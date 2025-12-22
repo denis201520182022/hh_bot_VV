@@ -21,10 +21,10 @@ LLM_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_LLM_REQUESTS)
 # ---------------------------------------------------
 
 # Загружаем настройки прокси из .env
-SQUID_PROXY_HOST = os.getenv("SQUID_PROXY_HOST", "38.180.203.212")
-SQUID_PROXY_PORT = os.getenv("SQUID_PROXY_PORT", "8787")
-SQUID_PROXY_USER = os.getenv("SQUID_PROXY_USER", "zabota")
-SQUID_PROXY_PASSWORD = os.getenv("SQUID_PROXY_PASSWORD", "zabota2000")
+SQUID_PROXY_HOST = os.getenv("SQUID_PROXY_HOST")
+SQUID_PROXY_PORT = os.getenv("SQUID_PROXY_PORT")
+SQUID_PROXY_USER = os.getenv("SQUID_PROXY_USER")
+SQUID_PROXY_PASSWORD = os.getenv("SQUID_PROXY_PASSWORD")
 
 # Формируем URL прокси с аутентификацией
 proxy_url = (
@@ -70,7 +70,7 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
     ]
     messages.extend(dialogue_history)
     messages.append({"role": "user", "content": user_message})
-    print(messages)
+    #print(messages)
     try:
         logger.info(f"Отправка запроса к LLM через прокси...")
 
