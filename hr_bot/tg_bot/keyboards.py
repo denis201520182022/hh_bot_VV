@@ -30,15 +30,23 @@ admin_keyboard = ReplyKeyboardMarkup(
     input_field_placeholder="Выберите действие:"
 )
 
-# --- Inline-клавиатуры ---
+# Главное меню статистики (вызывается кнопкой из Reply-клавиатуры)
+stats_main_menu_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="👁️ Посмотреть за 7 дней (текст)", callback_data="view_stats_7days")],
+        [InlineKeyboardButton(text="📥 Выгрузить в Excel (выбор дат)", callback_data="export_excel_start")]
+    ]
+)
 
-def create_stats_export_keyboard(period: str) -> InlineKeyboardMarkup:
-    """Создает клавиатуру для отчета со статистикой с кнопкой экспорта."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Выгрузить в Excel", callback_data=f"export_stats_{period}")]
-        ]
-    )
+# Быстрые варианты для экспорта
+export_date_options_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Последние 7 дней", callback_data="export_range_7")],
+        [InlineKeyboardButton(text="📅 Последние 14 дней", callback_data="export_range_14")],
+        [InlineKeyboardButton(text="📅 Последние 30 дней", callback_data="export_range_30")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")]
+    ]
+)
 
 # Клавиатура для отмены любого FSM-действия
 cancel_fsm_keyboard = InlineKeyboardMarkup(
