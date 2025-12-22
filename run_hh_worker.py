@@ -322,8 +322,14 @@ async def process_new_responses(recruiter_id: int, vacancy_ids: list):
                     # Проверка лимитов
                     settings_result = await db.execute(select(AppSettings).filter_by(id=1))
                     settings = settings_result.scalar_one_or_none()
-                    if not settings or settings.limit_used >= settings.limit_total:
-                        logger.warning(f"Лимиты исчерпаны. Отклик {response_id} не будет обработан.")
+
+                    if not settings:
+                        logger.error("Настройки AppSettings не найдены в БД!")
+                        continue
+
+                    # ПРОВЕРКА БАЛАНСА
+                    if settings.balance < settings.cost_per_dialogue:
+                        logger.warning(f"Недостаточно средств на балансе ({settings.balance}). Отклик {response_id} пропущен.")
                         continue
 
                     logger.info(f"\nНайден новый отклик {response_id} ({candidate_full_name}).")
@@ -376,8 +382,8 @@ async def process_new_responses(recruiter_id: int, vacancy_ids: list):
                     # Сначала перемещаем, чтобы зафиксировать намерение
                     await hh_api.move_response_to_folder(recruiter, db, response_id, 'consider')
 
-                    # Обновляем лимиты
-                    settings.limit_used += 1
+                    # СПИСАНИЕ СРЕДСТВ
+                    settings.balance -= settings.cost_per_dialogue
 
                     # Пытаемся получить сообщения, но ошибка здесь НЕ ДОЛЖНА отменять создание диалога
                     try:
@@ -416,11 +422,17 @@ async def process_new_responses(recruiter_id: int, vacancy_ids: list):
                     logger.info(f"✅ Диалог {response_id} успешно сохранен в БД.")
 
                     # Проверка лимита для уведомления
-                    if settings.limit_total - 15 <= settings.limit_used:
-                         # Отправляем алерт, но это не блокирует поток
-                         asyncio.create_task(send_system_alert(
-                            f"⚠️ Осталось {settings.limit_total - settings.limit_used} откликов!"
-                         ))
+                    # УВЕДОМЛЕНИЕ О НИЗКОМ БАЛАНСЕ
+                    if settings.balance < settings.low_balance_threshold and not settings.low_limit_notified:
+                        asyncio.create_task(send_system_alert(
+                            f"⚠️ Внимание! Баланс ниже {settings.low_balance_threshold} руб. "
+                            f"Текущий остаток: {settings.balance} руб."
+                        ))
+                        settings.low_limit_notified = True
+
+                    # Если баланс пополнили выше порога, сбрасываем флаг (опционально, но удобно)
+                    if settings.balance >= settings.low_balance_threshold:
+                        settings.low_limit_notified = False
 
                 except Exception as e:
                     logger.error(f"Ошибка при обработке отклика {resp.get('id')}: {e}", exc_info=True)
@@ -1639,9 +1651,9 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                 # Проверка: если диалог уже не in_progress (мог измениться параллельно), выходим
                 EXCLUDED_REMINDER_STATUSES = ['declined_interview', 'declined_vacancy' 'call_later']
-                if (dialogue.status != 'in_progress' or
+                if (dialogue.status not in ['in_progress', 'timed_out'] or
                     dialogue.dialogue_state in EXCLUDED_REMINDER_STATUSES or
-                    dialogue.reminder_level >= 3):
+                    dialogue.reminder_level >= 6): # Теперь до 6 уровня включительно
                     return
 
                 now = datetime.datetime.now(datetime.timezone.utc)
@@ -1702,6 +1714,19 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                 elif dialogue.reminder_level == 2 and time_since_update > datetime.timedelta(minutes=30):
                     should_timeout = True
 
+                # --- НОВЫЕ УРОВНИ ---
+                elif dialogue.reminder_level == 3 and time_since_update > datetime.timedelta(days=7):
+                    reminder_messages = ["Здравствуйте! Прошло некоторое время, но вакансия ещё актуальна. Подскажите, рассматриваете еще предложения о работе?"]
+                    next_level = 4
+
+                elif dialogue.reminder_level == 4 and time_since_update > datetime.timedelta(days=7):
+                    reminder_messages = ["Добрый день! Снова заглядываю к вам. Всё ещё ищем классных коллег. Если поиск работы актуален — дайте знать!"]
+                    next_level = 5
+
+                elif dialogue.reminder_level == 5 and time_since_update > datetime.timedelta(days=7):
+                    reminder_messages = ["Приветствую! Не хочу быть навязчивой, но это моё финальное напоминание. Если передумаете — пишите, будем рады пообщаться!"]
+                    next_level = 6
+
                 # Выполнение действия
                 if should_timeout:
                     # Таймаут
@@ -1714,6 +1739,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                     dialogue.status = 'timed_out'
                     dialogue.reminder_level = 3
+                    dialogue.last_updated = now
                     logger.info(f"Диалог {dialogue_hh_id} переведен в статус 'timed_out'.")
                     await db.commit()
 
@@ -1722,6 +1748,17 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     logger.info(f"Отправка напоминания уровня {next_level} ({len(reminder_messages)} сообщений) для диалога {dialogue_hh_id}.")
 
                     all_sent = True
+                    # 1. Перед отправкой сообщения добавляем проверку тарификации
+                    is_long_reminder = next_level in [4,] # Уровни после таймаута
+
+                    if is_long_reminder:
+                        # Проверяем баланс перед отправкой
+                        settings_res = await db.execute(select(AppSettings).filter_by(id=1))
+                        settings = settings_res.scalar_one_or_none()
+                        
+                        if not settings or settings.balance < settings.cost_per_long_reminder:
+                            logger.warning(f"Баланс пуст. Долгое напоминание для {dialogue_hh_id} отменено.")
+                            return # Не шлем сообщение, если нет денег
                     for msg in reminder_messages:
                         status_code = await hh_api.send_message(recruiter, db, dialogue_hh_id, msg)
 
@@ -1731,6 +1768,9 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                             current_history = list(dialogue.history) if dialogue.history else []
                             current_history.append(new_history_entry)
                             dialogue.history = current_history[-150:]
+                            if is_long_reminder:
+                                settings.balance -= settings.cost_per_long_reminder
+                                logger.info(f"Списано {settings.cost_per_long_reminder} руб. за долгое напоминание Lvl {next_level}")
                         elif status_code == 403:
                              # Вакансия закрыта или доступ запрещен
                              dialogue.reminder_level = 3
@@ -1778,15 +1818,17 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
 
         # 2. Быстрая выборка ТОЛЬКО ID кандидатов, которым (возможно) нужны напоминания
         # Мы не грузим здесь объекты целиком, только ID
-        EXCLUDED_REMINDER_STATUSES = ['declined_vacancy', 'declined_interview' 'call_later']
+        EXCLUDED_REMINDER_STATUSES = ['declined_vacancy', 'declined_interview', 'call_later']
 
         result = await db.execute(
             select(Dialogue.id)
             .filter(
                 Dialogue.recruiter_id == recruiter_id,
-                Dialogue.status == 'in_progress',
+                # ИЗМЕНЕНИЕ: Разрешаем обработку и для тех, кто уже в статусе timed_out,
+                # но еще не достиг финального уровня напоминаний
+                Dialogue.status.in_(['in_progress', 'timed_out']), 
                 Dialogue.dialogue_state.notin_(EXCLUDED_REMINDER_STATUSES),
-                Dialogue.reminder_level < 3
+                Dialogue.reminder_level < 6 # 6 — это будет последнее напоминание (21 день)
             )
         )
         candidate_ids_to_check = result.scalars().all()

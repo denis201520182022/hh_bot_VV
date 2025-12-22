@@ -9,8 +9,7 @@ alembic/
 logs/
 credentials.json
 temp/
-hr_bot/db/models.py
-models.py
+
 Скач_с_серв/
 Ошибки_DNS.txt
 Утилита.zip

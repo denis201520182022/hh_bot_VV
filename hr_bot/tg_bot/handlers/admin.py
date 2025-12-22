@@ -55,7 +55,9 @@ class RecruiterManagement(StatesGroup):
     update_topic_timeout = State()   # <-- НОВОЕ
 
 class SettingsManagement(StatesGroup):
-    set_limit = State(); set_tariff = State()
+    set_balance = State()              # Вместо set_limit
+    set_cost_dialogue = State()        # Стоимость входа
+    set_cost_long_reminder = State()   # Стоимость напоминалок (7/14/21 день)
 
 # --- Обработчики отмены ---
 @router.message(Command("cancel"))
@@ -80,67 +82,74 @@ async def limits_menu(message: Message, db_session: Session):
     if not settings:
         await message.answer("❌ Не удалось загрузить настройки.")
         return
-    remaining = settings.limit_total - settings.limit_used
-    cost = settings.limit_used * settings.cost_per_response
+
     content = Text(
-        Bold("📊 Текущий статус:"), "\n\n",
-        "Лимит: ", Bold(settings.limit_total), " откликов\n",
-        "Использовано: ", Bold(settings.limit_used), " (на сумму: ", Bold(f"{cost:.2f}"), " руб.)\n",
-        "Осталось: ", Bold(remaining), "\n\n",
-        "Текущий тариф: ", Bold(f"{settings.cost_per_response:.2f}"), " руб. за отклик"
+        Bold("📊 Управление балансом:"), "\n\n",
+        "Текущий баланс: ", Bold(f"{settings.balance:.2f}"), " руб.\n\n",
+        "💰 ", Bold("Тарифы:"), "\n",
+        "Новый диалог: ", Bold(f"{settings.cost_per_dialogue:.2f}"), " руб.\n",
+        "Долгое напоминание: ", Bold(f"{settings.cost_per_long_reminder:.2f}"), " руб.\n\n",
+        "🔔 Уведомление при балансе < ", Bold(f"{settings.low_balance_threshold:.2f}"), " руб."
     )
+    # Используем ту же клавиатуру (предполагаем, что кнопки называются так же или поправлены в keyboards.py)
     await message.answer(**content.as_kwargs(), reply_markup=limits_menu_keyboard)
-
-@router.callback_query(F.data == "set_limit")
-async def start_set_limit(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(SettingsManagement.set_limit)
-    await callback.message.answer("Введите новое значение лимита или выберите готовый вариант:", reply_markup=limit_options_keyboard)
+@router.callback_query(F.data == "set_limit") # Оставляем callback как в клавиатуре
+async def start_set_balance(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsManagement.set_balance)
+    await callback.message.answer("Введите новую сумму общего баланса в рублях (например: 5000):")
     await callback.answer()
 
-@router.message(SettingsManagement.set_limit)
-async def process_set_limit(message: Message, state: FSMContext, db_session: Session):
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("Действие отменено.", reply_markup=admin_keyboard)
-        return
-    if not message.text or not message.text.isdigit() or int(message.text) < 0:
-        await message.answer("❌ Лимит должен быть целым числом. Попробуйте еще раз.")
-        return
-    new_limit = int(message.text)
-    settings = db_session.query(AppSettings).filter_by(id=1).first()
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    settings.limit_total = new_limit
-    settings.limit_used = 0  # <--- Обнуляем счетчик использованных откликов
-    settings.low_limit_notified = False # <--- Сбрасываем флаг уведомления о низком лимите
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    db_session.commit()
-    await state.clear()
-
-    # Обновляем сообщение для пользователя
-    content = Text("✅ Новый лимит установлен: ", Bold(new_limit), " откликов. Счетчик использованных обнулен.")
-    await message.answer(**content.as_kwargs(), reply_markup=admin_keyboard)
-
-@router.callback_query(F.data == "set_tariff")
-async def start_set_tariff(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(SettingsManagement.set_tariff)
-    await callback.message.answer("Введите новую стоимость одного отклика в рублях (например: `150.50`).", reply_markup=ReplyKeyboardRemove())
-    await callback.answer()
-
-@router.message(SettingsManagement.set_tariff)
-async def process_set_tariff(message: Message, state: FSMContext, db_session: Session):
+@router.message(SettingsManagement.set_balance)
+async def process_set_balance(message: Message, state: FSMContext, db_session: Session):
     try:
-        new_tariff = float(message.text.replace(',', '.'))
-        if new_tariff < 0: raise ValueError
+        new_balance = float(message.text.replace(',', '.'))
+        if new_balance < 0: raise ValueError
     except (ValueError, TypeError):
-        await message.answer("❌ Тариф должен быть положительным числом. Попробуйте еще раз.")
+        await message.answer("❌ Сумма должна быть числом. Попробуйте еще раз.")
         return
+
     settings = db_session.query(AppSettings).filter_by(id=1).first()
-    settings.cost_per_response = new_tariff
+    settings.balance = new_balance
+    
+    # Сбрасываем флаг уведомления, если баланс теперь выше порога
+    if new_balance >= settings.low_balance_threshold:
+        settings.low_limit_notified = False
+
     db_session.commit()
     await state.clear()
-    content = Text("✅ Новый тариф установлен: ", Bold(f"{new_tariff:.2f}"), " руб. за отклик.")
-    await message.answer(**content.as_kwargs(), reply_markup=admin_keyboard)
+    await message.answer(f"✅ Баланс обновлен: {new_balance:.2f} руб.", reply_markup=admin_keyboard)
+@router.callback_query(F.data == "set_tariff")
+async def start_set_cost_dialogue(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsManagement.set_cost_dialogue)
+    await callback.message.answer("Введите стоимость создания ОДНОГО ДИАЛОГА (в рублях):")
+    await callback.answer()
+
+@router.message(SettingsManagement.set_cost_dialogue)
+async def process_set_cost_dialogue(message: Message, state: FSMContext, db_session: Session):
+    try:
+        val = float(message.text.replace(',', '.'))
+        settings = db_session.query(AppSettings).filter_by(id=1).first()
+        settings.cost_per_dialogue = val
+        db_session.commit()
+        
+        # Переходим к следующему шагу - стоимость напоминалки
+        await state.set_state(SettingsManagement.set_cost_long_reminder)
+        await message.answer(f"✅ Ок. Теперь введите стоимость ОДНОГО ДОЛГОГО НАПОМИНАНИЯ (7/14/21 день):")
+    except:
+        await message.answer("❌ Ошибка в числе. Попробуйте еще раз.")
+
+@router.message(SettingsManagement.set_cost_long_reminder)
+async def process_set_cost_reminder(message: Message, state: FSMContext, db_session: Session):
+    try:
+        val = float(message.text.replace(',', '.'))
+        settings = db_session.query(AppSettings).filter_by(id=1).first()
+        settings.cost_per_long_reminder = val
+        db_session.commit()
+        
+        await state.clear()
+        await message.answer("✅ Все тарифы успешно обновлены.", reply_markup=admin_keyboard)
+    except:
+        await message.answer("❌ Ошибка в числе.")
 
 # --- 1. УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ---
 @router.message(F.text == "👤 Управление пользователями")
