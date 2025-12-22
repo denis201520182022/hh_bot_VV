@@ -426,7 +426,7 @@ async def process_new_responses(recruiter_id: int, vacancy_ids: list):
                     if settings.balance < settings.low_balance_threshold and not settings.low_limit_notified:
                         asyncio.create_task(send_system_alert(
                             f"⚠️ Внимание! Баланс ниже {settings.low_balance_threshold} руб. "
-                            f"Текущий остаток: {settings.balance} руб."
+                            f"Текущий остаток: {settings.balance} руб.", alert_type="balance"
                         ))
                         settings.low_limit_notified = True
 
@@ -1056,7 +1056,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
         if llm_data is None:
             alert_message = "⚠️ LLM service unavailable!"
-            await send_system_alert(alert_message)
+            await send_system_alert(alert_message, alert_type="admin_only")
             return
 
         # Распаковка ответа

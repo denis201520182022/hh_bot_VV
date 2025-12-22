@@ -61,7 +61,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
         # Если мы дошли сюда, значит токен действительно нужно обновить и мы единственные, кто это делает.
         logger.info(f"Токен для рекрутера {recruiter.name} истек или отсутствует. Обновляю...")
         epp = f"Токен для рекрутера {recruiter.name} истек или отсутствует. Обновляю..."
-        await send_system_alert(epp)
+        await send_system_alert(epp, alert_type="admin_only")
         if not recruiter.refresh_token:
             logger.error(f"У рекрутера {recruiter.name} (ID: {recruiter.recruiter_id}) нет refresh_token!")
             error_message = (
@@ -70,7 +70,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
                 f"Причина: Отсутствует refresh_token в базе данных.\n"
                 f"Действие: Требуется провести повторную авторизацию."
             )
-            await send_system_alert(error_message)
+            await send_system_alert(error_message, alert_type="admin_only")
             return None
 
         url = "https://api.hh.ru/token"
@@ -98,10 +98,10 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
         )
         if response.status_code != 200:
             api_raw_logger.warning(response_log)
-            await send_system_alert(f"🔴 ВНИМАНИЕ: Неуспешная попытка обновления токена для {recruiter.name}")
+            await send_system_alert(f"🔴 ВНИМАНИЕ: Неуспешная попытка обновления токена для {recruiter.name}", alert_type="admin_only")
         else:
             api_raw_logger.info(response_log)
-            await send_system_alert(f"✅ Успешно получен токен для {recruiter.name}")
+            await send_system_alert(f"✅ Успешно получен токен для {recruiter.name}", alert_type="admin_only")
 
         if response.status_code == 200:
             tokens = response.json()
@@ -114,7 +114,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
             # ИЗМЕНЕНИЕ: await db.commit() вместо await asyncio.to_thread(db.commit)
             await db.commit() 
             logger.info(f"Успешно получен новый access_token для рекрутера {recruiter.name}.")
-            await send_system_alert(f"✅ Успешно сохранен новый токен для {recruiter.name}.")
+            await send_system_alert(f"✅ Успешно сохранен новый токен для {recruiter.name}.", alert_type="admin_only")
             return recruiter.access_token
         else:
             try:
@@ -141,7 +141,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
                         f"Причина от HH.ru: {response.text}\n\n"
                         f"Действие: Требуется провести повторную авторизацию (восстановить пароль)."
                     )
-                    await send_system_alert(error_message)
+                    await send_system_alert(error_message, alert_type="admin_only")
                     return None
                 else:
                     logger.critical(f"Ошибка обновления токена для {recruiter.name}: {response.text}")
@@ -151,7 +151,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
                         f"Причина от HH.ru: {response.text}\n\n"
                         f"Действие: Требуется провести повторную авторизацию."
                     )
-                    await send_system_alert(error_message)
+                    await send_system_alert(error_message, alert_type="admin_only")
                     return None
 
             except json.JSONDecodeError:
@@ -162,7 +162,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
                     f"Причина: HH.ru вернул нечитаемый ответ (не JSON) при попытке обновить токен. Возможно, на их стороне сбой.\n\n"
                     f"Текст ответа: {response.text}"
                 )
-                await send_system_alert(error_message)
+                await send_system_alert(error_message, alert_type="admin_only")
                 return None
             except Exception as e:
                 logger.critical(f"Неизвестная ошибка при обработке ответа токена для {recruiter.name}: {e}, Response: {response.text}")
@@ -172,7 +172,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
                     f"Причина: {e}\n\n"
                     f"Текст ответа: {response.text}"
                 )
-                await send_system_alert(error_message)
+                await send_system_alert(error_message, alert_type="admin_only")
                 return None
                 
 @retry(

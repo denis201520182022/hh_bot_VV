@@ -1,35 +1,43 @@
-# hr_bot/utils/system_notifier.py
 import os
 import asyncio
+import logging
 from aiogram import Bot
-# --- ИЗМЕНЕНИЕ: Добавлен импорт AsyncSession и select ---
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-# --- КОНЕЦ ИЗМЕНЕНИЯ ---
 from hr_bot.db.models import SessionLocal, TelegramUser
 
-async def send_system_alert(message_text: str):
+# Инициализируем логгер
+logger = logging.getLogger(__name__)
+
+async def send_system_alert(message_text: str, alert_type: str = "admin_only"):
+    """
+    alert_type: 
+    - "admin_only": Технические ошибки, токены, логи (только админам)
+    - "balance": Уведомление о пороге 500 руб (всем пользователям)
+    - "all": Критические объявления (всем пользователям)
+    """
     bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
     
-    # ИЗМЕНЕНИЕ: Использование асинхронного контекстного менеджера для сессии БД
-    async with SessionLocal() as db: # Было: db = SessionLocal()
+    async with SessionLocal() as db:
         try:
-            # Отправляем всем: и админам, и пользователям
-            # ИЗМЕНЕНИЕ: Асинхронный запрос к БД
-            result = await db.execute(select(TelegramUser))
-            all_users = result.scalars().all() # ИЗМЕНЕНИЕ: Получение скалярных результатов
+            # ЛОГИКА ФИЛЬТРАЦИИ:
+            if alert_type == "admin_only":
+                # Только админы
+                stmt = select(TelegramUser).where(TelegramUser.role == 'admin')
+            else:
+                # И админы, и обычные юзеры (для "balance" и "all")
+                stmt = select(TelegramUser)
+                
+            result = await db.execute(stmt)
+            users_to_notify = result.scalars().all()
             
-            for user in all_users:
+            for user in users_to_notify:
                 try:
                     await bot.send_message(chat_id=user.telegram_id, text=message_text)
                 except Exception as e:
-                    # Логируем ошибку, чтобы знать, кому не удалось отправить
-                    logging.error(f"Не удалось отправить системное оповещение пользователю {user.telegram_id}: {e}")
-                    pass # Игнорируем ошибки, если не удалось доставить кому-то одному
+                    logger.warning(f"Не удалось отправить сообщение {user.telegram_id}: {e}")
+                    continue 
         except Exception as e:
-            logging.critical(f"Критическая ошибка при попытке отправить системное оповещение: {e}", exc_info=True)
+            logger.error(f"Ошибка в send_system_alert: {e}", exc_info=True)
         finally:
-            # ИЗМЕНЕНИЕ: db.close() не нужен, так как async with закрывает сессию автоматически
-            # bot.session.close() остается, так как это относится к aiogram
-            await bot.session.close() # Этот await уже был, это правильно для aiogram сессии.
-            # db.close() # Удален
+            await bot.session.close()

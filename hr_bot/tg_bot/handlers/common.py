@@ -19,37 +19,16 @@ from hr_bot.tg_bot.keyboards import (
     create_stats_export_keyboard
 )
 
+from datetime import date, timedelta
+from sqlalchemy import func, cast, Date
+from hr_bot.db.models import (
+    TelegramUser, Statistic, Vacancy, AppSettings, 
+    InactiveNotificationQueue, RejectedNotificationQueue, NotificationQueue
+)
+
 logger = logging.getLogger(__name__)
 router = Router()
 
-def _build_stats_content(stats_query, period_text: str) -> Text:
-    """Собирает форматированный отчет с помощью конструктора aiogram."""
-    if not stats_query:
-        return Text("📊 Статистика ", Italic(period_text), " пока пуста.")
-    
-    total_responses, total_dialogs, total_qualified = 0, 0, 0
-    content_parts = [Bold(f"📊 Статистика {period_text}"), "\n\n"]
-    
-    for stat in stats_query:
-        total_responses += stat.total_responses or 0
-        total_dialogs += stat.total_dialogs or 0
-        total_qualified += stat.total_qualified or 0
-        
-        # Конструктор Bold() сам позаботится об экранировании спецсимволов в названии
-        content_parts.extend([
-            Bold(stat.title), ":\n",
-            "  - Откликов: ", Bold(stat.total_responses or 0), "\n",
-            "  - Диалогов: ", Bold(stat.total_dialogs or 0), "\n",
-            "  - Квалифицировано: ", Bold(stat.total_qualified or 0), "\n\n"
-        ])
-    
-    content_parts.extend([
-        Bold("Итого по всем вакансиям:"), "\n",
-        "  - Откликов: ", Bold(total_responses), "\n",
-        "  - Диалогов: ", Bold(total_dialogs), "\n",
-        "  - Квалифицировано: ", Bold(total_qualified)
-    ])
-    return Text(*content_parts)
 
 
 @router.message(CommandStart())
@@ -76,71 +55,6 @@ async def handle_start(message: Message, db_session: Session):
     await message.answer(**content.as_kwargs(), reply_markup=keyboard)
 
 
-@router.message(F.text == "📊 Статистика")
-@router.message(Command("stats"))
-async def handle_stats_command(message: Message, db_session: Session):
-    if not db_session.query(TelegramUser).filter(TelegramUser.telegram_id == str(message.from_user.id)).first():
-        return
-    await message.answer("Выберите период для просмотра статистики:", reply_markup=stats_period_keyboard)
-
-
-@router.callback_query(F.data == "stats_today")
-async def process_stats_today(callback: CallbackQuery, db_session: Session):
-    today = date.today()
-    stats_query = db_session.query(
-        Vacancy.title,
-        func.sum(Statistic.responses_count).label('total_responses'),
-        func.sum(Statistic.started_dialogs_count).label('total_dialogs'),
-        func.sum(Statistic.qualified_count).label('total_qualified')
-    ).join(Statistic).filter(Statistic.date == today).group_by(Vacancy.title).all()
-    content = _build_stats_content(stats_query, f"за {today.strftime('%d.%m.%Y')}")
-    await callback.message.edit_text(**content.as_kwargs(), reply_markup=create_stats_export_keyboard(period="today"))
-    await callback.answer()
-
-
-@router.callback_query(F.data == "stats_all_time")
-async def process_stats_all_time(callback: CallbackQuery, db_session: Session):
-    stats_query = db_session.query(
-        Vacancy.title,
-        func.sum(Statistic.responses_count).label('total_responses'),
-        func.sum(Statistic.started_dialogs_count).label('total_dialogs'),
-        func.sum(Statistic.qualified_count).label('total_qualified')
-    ).join(Statistic).group_by(Vacancy.title).all()
-    content = _build_stats_content(stats_query, "за всё время")
-    await callback.message.edit_text(**content.as_kwargs(), reply_markup=create_stats_export_keyboard(period="all_time"))
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("export_stats_"))
-async def export_stats_to_excel(callback: CallbackQuery, db_session: Session):
-    await callback.answer("Готовлю Excel-отчет...", show_alert=False)
-    period = callback.data.split("_")[-1]
-    today = date.today()
-    query_builder = db_session.query(
-        Vacancy.title.label('Вакансия'),
-        func.sum(Statistic.responses_count).label('Количество откликов'),
-        func.sum(Statistic.started_dialogs_count).label('Начато диалогов'),
-        func.sum(Statistic.qualified_count).label('Прошли квалификацию')
-    ).join(Statistic)
-    if period == "today":
-        query_builder = query_builder.filter(Statistic.date == today)
-        filename = f"hr_stats_{today.strftime('%Y-%m-%d')}.xlsx"
-    else:
-        filename = "hr_stats_all_time.xlsx"
-    stats_data = query_builder.group_by(Vacancy.title).all()
-    if not stats_data:
-        await callback.message.answer("Нет данных для экспорта.")
-        return
-    df = pd.DataFrame(stats_data)
-    output_buffer = io.BytesIO()
-    df.to_excel(output_buffer, index=False, sheet_name='Статистика')
-    output_buffer.seek(0)
-    file_to_send = BufferedInputFile(output_buffer.read(), filename=filename)
-    
-    # Конструктор Italic() сам позаботится об экранировании символов '_' в имени файла
-    content = Text("Ваш отчет ", Italic(filename))
-    await callback.message.answer_document(file_to_send, **content.as_kwargs())
-
 
 @router.message(F.text == "❓ Помощь")
 @router.message(Command("help"))
@@ -166,3 +80,62 @@ async def handle_help(message: Message, db_session: Session):
         )
     # help_text безопасен, так как не содержит пользовательского ввода
     await message.answer(help_text)
+
+
+
+
+def _build_7day_stats_content(db_session: Session) -> Text:
+    """Собирает отчет за последние 7 дней посуточно."""
+    content_parts = [Bold("📅 Статистика за последние 7 дней:"), "\n\n"]
+    
+    # Генерируем список дат (от сегодня и назад)
+    days = [date.today() - timedelta(days=i) for i in range(7)]
+    
+    has_any_data = False
+
+    for day in days:
+        # 1. Считаем отклики (из таблицы статистики)
+        responses = db_session.query(func.sum(Statistic.responses_count))\
+            .filter(Statistic.date == day).scalar() or 0
+        
+        # 2. Считаем молчунов (из очереди уведомлений о неактивности)
+        # Используем cast, так как в очередях поле created_at — это DateTime, а нам нужен Date
+        silents = db_session.query(func.count(InactiveNotificationQueue.id))\
+            .filter(cast(InactiveNotificationQueue.created_at, Date) == day).scalar() or 0
+            
+        # 3. Считаем отказников (из очереди отказов)
+        rejects = db_session.query(func.count(RejectedNotificationQueue.id))\
+            .filter(cast(RejectedNotificationQueue.created_at, Date) == day).scalar() or 0
+            
+        # 4. Считаем подошедших (из основной очереди уведомлений)
+        qualified = db_session.query(func.count(NotificationQueue.id))\
+            .filter(cast(NotificationQueue.created_at, Date) == day).scalar() or 0
+
+        # Если за день есть хоть какая-то активность, выводим его
+        if any([responses, silents, rejects, qualified]):
+            has_any_data = True
+            day_str = day.strftime('%d.%m (%a)') # Например: 22.10 (Пн)
+            content_parts.extend([
+                Bold(f"🗓 {day_str}"), "\n",
+                "  📥 Откликов: ", Bold(responses), "\n",
+                "  🟢 Подошло: ", Bold(qualified), "\n",
+                "  🔴 Отказов: ", Bold(rejects), "\n",
+                "  😶 Молчунов: ", Bold(silents), "\n",
+                "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            ])
+
+    if not has_any_data:
+        return Text("📊 За последние 7 дней данных пока нет.")
+
+    return Text(*content_parts)
+
+# --- Обновленный хендлер кнопки статистики ---
+@router.callback_query(F.data == "stats_today") # Оставляем старый callback или меняем в клавиатуре
+async def process_stats_7days(callback: CallbackQuery, db_session: Session):
+    content = _build_7day_stats_content(db_session)
+    # Используем edit_text для обновления меню
+    await callback.message.edit_text(
+        **content.as_kwargs(), 
+        reply_markup=create_stats_export_keyboard(period="7days")
+    )
+    await callback.answer()

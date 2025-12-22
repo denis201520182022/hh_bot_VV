@@ -202,20 +202,15 @@ class TrackedVacancy(Base):
 
 
 class AppSettings(Base):
-    """Глобальные настройки приложения (баланс и тарифы)."""
     __tablename__ = 'app_settings'
     
     id = Column(Integer, primary_key=True)
-    # Текущий баланс в рублях
-    balance = Column(Numeric(12, 2), nullable=False, default=0.00)
-    # Стоимость создания одного диалога
-    cost_per_dialogue = Column(Numeric(10, 2), nullable=False, default=19.00)
-    # Стоимость одного "долгого" напоминания (7, 14, 21 день)
-    cost_per_long_reminder = Column(Numeric(10, 2), nullable=False, default=5.00) 
-    # Порог уведомления
-    low_balance_threshold = Column(Numeric(10, 2), nullable=False, default=500.00)
-    # Флаг уведомления
-    low_limit_notified = Column(Boolean, nullable=False, default=False)
+    # Используем server_default для базы данных и default для SQLAlchemy
+    balance = Column(Numeric(12, 2), nullable=False, default=0.00, server_default='0.00')
+    cost_per_dialogue = Column(Numeric(10, 2), nullable=False, default=19.00, server_default='19.00')
+    cost_per_long_reminder = Column(Numeric(10, 2), nullable=False, default=5.00, server_default='5.00')
+    low_balance_threshold = Column(Numeric(10, 2), nullable=False, default=500.00, server_default='500.00')
+    low_limit_notified = Column(Boolean, nullable=False, default=False, server_default='false')
 
     # --- НОВАЯ МОДЕЛЬ ДЛЯ УВЕДОМЛЕНИЙ О НЕАКТИВНЫХ КАНДИДАТАХ ---
 class InactiveNotificationQueue(Base):

@@ -76,7 +76,7 @@ async def cancel_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # --- УПРАВЛЕНИЕ ЛИМИТАМИ И ТАРИФАМИ ---
-@router.message(F.text == "⚙️ Лимиты и Тариф")
+@router.message(F.text == "⚙️ Баланс и Тариф")
 async def limits_menu(message: Message, db_session: Session):
     settings = db_session.query(AppSettings).filter_by(id=1).first()
     if not settings:
@@ -134,7 +134,7 @@ async def process_set_cost_dialogue(message: Message, state: FSMContext, db_sess
         
         # Переходим к следующему шагу - стоимость напоминалки
         await state.set_state(SettingsManagement.set_cost_long_reminder)
-        await message.answer(f"✅ Ок. Теперь введите стоимость ОДНОГО ДОЛГОГО НАПОМИНАНИЯ (7/14/21 день):")
+        await message.answer(f"✅ Ок. Теперь введите стоимость ПАЧКИ ДОЛГИХ НАПОМИНАНИЙ (7/14/21 день):")
     except:
         await message.answer("❌ Ошибка в числе. Попробуйте еще раз.")
 

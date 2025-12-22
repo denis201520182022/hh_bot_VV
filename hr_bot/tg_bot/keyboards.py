@@ -15,7 +15,7 @@ from typing import List, Any
 # Клавиатура для обычного пользователя
 user_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Лимиты")],
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Баланс")],
         [KeyboardButton(text="❓ Помощь")]
     ],
     resize_keyboard=True
@@ -23,8 +23,8 @@ user_keyboard = ReplyKeyboardMarkup(
 
 # Клавиатура для администратора
 admin_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Лимиты и Тариф")],
+     keyboard=[
+        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Баланс и Тариф")], # <--- Должно быть так
         [KeyboardButton(text="👤 Управление пользователями")],
         [KeyboardButton(text="👨‍💼 Управление рекрутерами")],
         [KeyboardButton(text="❓ Помощь")]
@@ -40,7 +40,7 @@ admin_keyboard = ReplyKeyboardMarkup(
 stats_period_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [
-            InlineKeyboardButton(text="📊 За сегодня", callback_data="stats_today"),
+            InlineKeyboardButton(text="📅 Последние 7 дней", callback_data="stats_today"),
             InlineKeyboardButton(text="🗓️ За всё время", callback_data="stats_all_time")
         ]
     ]
@@ -74,7 +74,7 @@ role_choice_keyboard = InlineKeyboardMarkup(
 # Клавиатура для меню управления лимитами (только для админов)
 limits_menu_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Установить лимит", callback_data="set_limit")],
+        [InlineKeyboardButton(text="⚙️ Установить баланс", callback_data="set_limit")],
         [InlineKeyboardButton(text="💰 Установить тариф", callback_data="set_tariff")]
     ]
 )
