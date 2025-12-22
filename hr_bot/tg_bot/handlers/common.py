@@ -98,39 +98,85 @@ async def export_range_manual(message: Message, state: FSMContext, db_session: S
         await generate_and_send_excel(message, start_date, end_date, db_session, state)
     except Exception:
         await message.answer("❌ Неверный формат. Пример: 01.12.2025 - 10.12.2025")
-
 async def generate_and_send_excel(message: Message, start_date: date, end_date: date, db: Session, state: FSMContext):
-    msg_wait = await message.answer("⏳ Формирую Excel...")
+    msg_wait = await message.answer("⏳ Собираю данные и формирую умный отчет...")
+    
     data = []
     current_day = start_date
     while current_day <= end_date:
-        results = db.query(TrackedRecruiter.name.label("recruiter"), Vacancy.city.label("city"), Vacancy.title.label("vacancy"), Vacancy.id.label("v_id"), TrackedRecruiter.id.label("r_id")).join(Vacancy, Vacancy.recruiter_id == TrackedRecruiter.id).all()
+        # Получаем структуру: Рекрутер -> Город -> Вакансия
+        results = db.query(
+            TrackedRecruiter.name.label("recruiter"),
+            Vacancy.city.label("city"),
+            Vacancy.title.label("vacancy"),
+            Vacancy.id.label("v_id")
+        ).join(Vacancy, Vacancy.recruiter_id == TrackedRecruiter.id).all()
+
         for row in results:
             resp = db.query(Statistic.responses_count).filter(Statistic.vacancy_id == row.v_id, Statistic.date == current_day).scalar() or 0
             sil = db.query(func.count(InactiveNotificationQueue.id)).join(Dialogue).filter(Dialogue.vacancy_id == row.v_id, cast(InactiveNotificationQueue.created_at, Date) == current_day).scalar() or 0
             rej = db.query(func.count(RejectedNotificationQueue.id)).join(Dialogue).filter(Dialogue.vacancy_id == row.v_id, cast(RejectedNotificationQueue.created_at, Date) == current_day).scalar() or 0
             qual = db.query(func.count(NotificationQueue.id)).join(Dialogue, Dialogue.candidate_id == NotificationQueue.candidate_id).filter(Dialogue.vacancy_id == row.v_id, cast(NotificationQueue.created_at, Date) == current_day).scalar() or 0
+
             if any([resp, sil, rej, qual]):
-                data.append({"Дата": current_day.strftime("%d.%m.%Y"), "Рекрутер": row.recruiter, "Город": row.city, "Вакансия": row.vacancy, "Отклики": resp, "Собес": qual, "Отказы": rej, "Молчуны": sil})
+                data.append({
+                    "Дата": current_day.strftime("%d.%m.%Y"),
+                    "Рекрутер": row.recruiter,
+                    "Город": row.city,
+                    "Вакансия": row.vacancy,
+                    "Отклики": resp,
+                    "Собес": qual,
+                    "Отказы": rej,
+                    "Молчуны": sil
+                })
         current_day += timedelta(days=1)
+
     if not data:
-        await msg_wait.edit_text("🤷 Данных нет.")
+        await msg_wait.edit_text("🤷 Данных не найдено.")
         await state.clear()
         return
+
     df = pd.DataFrame(data)
     output = io.BytesIO()
+    
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Отчет')
+        workbook  = writer.book
         worksheet = writer.sheets['Отчет']
-        worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
+        
+        # Форматы
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+        total_fmt = workbook.add_format({'bold': True, 'bg_color': '#FCE4D6', 'top': 2})
+        
+        last_row = len(df)
+        
+        # 1. Добавляем фильтры
+        worksheet.autofilter(0, 0, last_row, len(df.columns) - 1)
+        
+        # 2. Пишем строку ИТОГО
+        worksheet.write(last_row + 1, 0, "ИТОГО (ПО ФИЛЬТРУ):", total_fmt)
+        # Проходим по колонкам с цифрами (Отклики, Собес, Отказы, Молчуны)
+        # В нашем DF это индексы 4, 5, 6, 7 (столбцы E, F, G, H)
+        for col_num in range(4, 8):
+            col_letter = chr(ord('A') + col_num)
+            # Формула SUBTOTAL(109, ...) считает сумму только ВИДИМЫХ строк
+            # Диапазон: от 2-й строки (индекс 1) до последней строки с данными
+            formula = f'=SUBTOTAL(109, {col_letter}2:{col_letter}{last_row + 1})'
+            worksheet.write_formula(last_row + 1, col_num, formula, total_fmt)
+
+        # 3. Закрепляем шапку
         worksheet.freeze_panes(1, 0)
+        
+        # 4. Автоширина колонок
         for i, col in enumerate(df.columns):
-            worksheet.set_column(i, i, max(df[col].astype(str).str.len().max(), len(col)) + 2)
+            max_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
+            worksheet.set_column(i, i, max_len)
+
     output.seek(0)
-    await message.answer_document(BufferedInputFile(output.read(), filename="Report.xlsx"), caption="📊 Отчет готов.")
+    filename = f"HR_Report_{start_date}_{end_date}.xlsx"
+    await message.answer_document(
+        BufferedInputFile(output.read(), filename=filename),
+        caption=f"📊 Готово! Используйте фильтры в Excel.\nСумма внизу (строка {last_row + 2}) будет меняться сама."
+    )
     await msg_wait.delete()
     await state.clear()
-
-@router.message(F.text == "❓ Помощь")
-async def handle_help(message: Message):
-    await message.answer("Используйте меню для работы.")
