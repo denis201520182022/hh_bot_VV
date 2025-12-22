@@ -9,7 +9,6 @@ from typing import List, Any
 
 # --- Основные Reply-клавиатуры ---
 
-# Клавиатура для обычного пользователя
 user_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Баланс")],
@@ -18,7 +17,6 @@ user_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Клавиатура для администратора
 admin_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Баланс и Тариф")],
@@ -30,7 +28,9 @@ admin_keyboard = ReplyKeyboardMarkup(
     input_field_placeholder="Выберите действие:"
 )
 
-# Главное меню статистики (вызывается кнопкой из Reply-клавиатуры)
+# --- Inline-клавиатуры для Статистики ---
+
+# Главное меню статистики
 stats_main_menu_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="👁️ Посмотреть за 7 дней (текст)", callback_data="view_stats_7days")],
@@ -38,7 +38,7 @@ stats_main_menu_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# Быстрые варианты для экспорта
+# Быстрые диапазоны для Excel
 export_date_options_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="📅 Последние 7 дней", callback_data="export_range_7")],
@@ -48,14 +48,20 @@ export_date_options_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# Клавиатура для отмены любого FSM-действия
+# Функция-заглушка (чтобы common.py не ругался на импорт), если вдруг она где-то вызывается
+def create_stats_export_keyboard(period: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Скачать Excel", callback_data=f"export_stats_{period}")]
+        ]
+    )
+
+# --- Остальные Inline-клавиатуры ---
+
 cancel_fsm_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")]
-    ]
+    inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")]]
 )
 
-# Клавиатура для выбора роли
 role_choice_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [
@@ -65,7 +71,6 @@ role_choice_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# Клавиатура для меню управления балансом
 limits_menu_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="⚙️ Установить баланс", callback_data="set_limit")],
@@ -73,7 +78,6 @@ limits_menu_keyboard = InlineKeyboardMarkup(
     ]
 )
 
-# Клавиатура с готовыми вариантами СУММ для баланса
 limit_options_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="1000"), KeyboardButton(text="5000"), KeyboardButton(text="10000")],
