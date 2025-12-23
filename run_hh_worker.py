@@ -1672,7 +1672,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     # Вакансия закрыта
                     logger.info(f"Вакансия для диалога {dialogue_hh_id} закрыта. Обновляю статус.")
                     dialogue.status = 'timed_out'
-                    dialogue.reminder_level = 3
+                    dialogue.reminder_level = 6
                     await db.commit()
                     return
 
@@ -1716,15 +1716,15 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                 # --- НОВЫЕ УРОВНИ ---
                 elif dialogue.reminder_level == 3 and time_since_update > datetime.timedelta(days=7):
-                    reminder_messages = ["Здравствуйте! Прошло некоторое время, но вакансия ещё актуальна. Подскажите, рассматриваете еще предложения о работе?"]
+                    reminder_messages = ["Добрый день. Если вы еще находитесь в поиске работы, ты будем рады пригласить вас пройти собеседование. Готовы продолжить диалог?"]
                     next_level = 4
 
-                elif dialogue.reminder_level == 4 and time_since_update > datetime.timedelta(days=7):
-                    reminder_messages = ["Добрый день! Снова заглядываю к вам. Всё ещё ищем классных коллег. Если поиск работы актуален — дайте знать!"]
+                elif dialogue.reminder_level == 4 and time_since_update > datetime.timedelta(days=21):
+                    reminder_messages = ["Добрый день. Вы трудоустроились? Если еще рассматриваете варианты, будем рады предложить вам пройти собеседование. А так же ответить на все вопросы, которые у вас есть. "]
                     next_level = 5
 
-                elif dialogue.reminder_level == 5 and time_since_update > datetime.timedelta(days=7):
-                    reminder_messages = ["Приветствую! Не хочу быть навязчивой, но это моё финальное напоминание. Если передумаете — пишите, будем рады пообщаться!"]
+                elif dialogue.reminder_level == 5 and time_since_update > datetime.timedelta(days=51):
+                    reminder_messages = ["Еще раз добрый день. Как ваши дела? Хотели бы сообщить вам, что вакансия вновь актуальна и если вы в поиске или задумываетесь о смене работы, мы с удовольствием пригласили вас на собеседование"]
                     next_level = 6
 
                 # Выполнение действия
@@ -1827,6 +1827,7 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
                 # ИЗМЕНЕНИЕ: Разрешаем обработку и для тех, кто уже в статусе timed_out,
                 # но еще не достиг финального уровня напоминаний
                 Dialogue.status.in_(['in_progress', 'timed_out']), 
+
                 Dialogue.dialogue_state.notin_(EXCLUDED_REMINDER_STATUSES),
                 Dialogue.reminder_level < 6 # 6 — это будет последнее напоминание (21 день)
             )
