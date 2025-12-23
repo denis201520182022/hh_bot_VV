@@ -123,17 +123,21 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
 
         if key not in report_map:
             report_map[key] = {
-                "Отклики": 0, "начали диалог": 0, "Собес": 0, 
-                "Отказался КД": 0, "Отказали мы": 0, "Молчуны": 0
+                "Отклики": 0, 
+                "начали_диалог": 0,  # Исправлено здесь
+                "Собес": 0, 
+                "Отказался КД": 0, 
+                "Отказали мы": 0, 
+                "Молчуны": 0
             }
 
         m = report_map[key]
         m["Отклики"] += 1
         
-        # Проверка начала диалога (реплика юзера без системной команды)
+        # Проверка начала диалога
         history = d.history or []
         if any(isinstance(h, dict) and h.get('role') == 'user' and '[SYSTEM COMMAND]' not in h.get('content', '') for h in history):
-            m["начали диалог"] += 1
+            m["начали_диалог"] += 1 # Исправлено здесь
 
         if d.status == 'qualified': m["Собес"] += 1
         if d.dialogue_state == 'declined_vacancy': m["Отказался КД"] += 1
@@ -144,10 +148,17 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
     rows = []
     for (dt, rec, cit, vac), m in report_map.items():
         rows.append({
-            "Дата": dt, "Рекрутер": rec, "Город": cit, "Вакансия": vac,
-            "Отклики": m["Отклики"], "начали диалог": m["начали_диалог"], "Собес": m["Собес"],
-            "Отказался КД": m["Отказался_КД"], "Отказали мы": m["Отказали_мы"], "Молчуны": m["Молчуны"],
-            "Отказы всего": m["Отказался_КД"] + m["Отказали_мы"]
+            "Дата": dt, 
+            "Рекрутер": rec, 
+            "Город": cit, 
+            "Вакансия": vac,
+            "Отклики": m["Отклики"], 
+            "начали диалог": m["начали_диалог"], # Слева - имя колонки, справа - ключ из шага 1
+            "Собес": m["Собес"],
+            "Отказался КД": m["Отказался КД"], 
+            "Отказали мы": m["Отказали мы"], 
+            "Молчуны": m["Молчуны"],
+            "Отказы всего": m["Отказался КД"] + m["Отказали мы"]
         })
 
     df_base = pd.DataFrame(rows)
@@ -162,13 +173,13 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
         }).reset_index()
 
         # Расчет конверсий
-        summary['Диалог/Отклик'] = summary['начали диалог'] / summary['Отклики']
-        summary['Собес/отклик'] = summary['Собес'] / summary['Отклики']
-        summary['Отказался КД/Отклик'] = summary['Отказался КД'] / summary['Отклики']
-        summary['Отказали мы/Отклик'] = summary['Отказали мы'] / summary['Отклики']
-        summary['Молчуны/отклик'] = summary['Молчуны'] / summary['Отклики']
-        summary['Молчуны/Диалог'] = summary['Молчуны'] / summary['начали диалог']
-        summary['Отказы всего/Диалог'] = summary['Отказы всего'] / summary['начали диалог']
+        summary['Диалог/Отклик'] = (summary['начали диалог'] / summary['Отклики']).fillna(0)
+        summary['Собес/отклик'] = (summary['Собес'] / summary['Отклики']).fillna(0)
+        summary['Отказался КД/Отклик'] = (summary['Отказался КД'] / summary['Отклики']).fillna(0)
+        summary['Отказали мы/Отклик'] = (summary['Отказали мы'] / summary['Отклики']).fillna(0)
+        summary['Молчуны/отклик'] = (summary['Молчуны'] / summary['Отклики']).fillna(0)
+        summary['Молчуны/Диалог'] = (summary['Молчуны'] / summary['начали диалог']).fillna(0)
+        summary['Отказы всего/Диалог'] = (summary['Отказы всего'] / summary['начали диалог']).fillna(0)
 
         # Строка ИТОГО
         total = summary.sum(numeric_only=True)
