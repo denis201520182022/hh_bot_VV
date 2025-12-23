@@ -99,12 +99,11 @@ async def export_range_manual(message: Message, state: FSMContext, db_session: S
     except Exception:
         await message.answer("❌ Неверный формат. Пример: 01.12.2025 - 10.12.2025")
 async def generate_and_send_excel(message: Message, start_date: date, end_date: date, db: Session, state: FSMContext):
-    msg_wait = await message.answer("⏳ Собираю данные и формирую умный отчет...")
+    msg_wait = await message.answer("⏳ Формирую отчет с графиками...")
     
     data = []
     current_day = start_date
     while current_day <= end_date:
-        # Получаем структуру: Рекрутер -> Город -> Вакансия
         results = db.query(
             TrackedRecruiter.name.label("recruiter"),
             Vacancy.city.label("city"),
@@ -144,30 +143,48 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
         workbook  = writer.book
         worksheet = writer.sheets['Отчет']
         
-        # Форматы
-        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
-        total_fmt = workbook.add_format({'bold': True, 'bg_color': '#FCE4D6', 'top': 2})
-        
+        # Стили
+        total_fmt = workbook.add_format({'bold': True, 'bg_color': '#FCE4D6', 'border': 1})
         last_row = len(df)
         
-        # 1. Добавляем фильтры
+        # 1. Фильтры
         worksheet.autofilter(0, 0, last_row, len(df.columns) - 1)
         
-        # 2. Пишем строку ИТОГО
-        worksheet.write(last_row + 1, 0, "ИТОГО (ПО ФИЛЬТРУ):", total_fmt)
-        # Проходим по колонкам с цифрами (Отклики, Собес, Отказы, Молчуны)
-        # В нашем DF это индексы 4, 5, 6, 7 (столбцы E, F, G, H)
+        # 2. Итоговая строка с умными формулами SUBTOTAL
+        worksheet.write(last_row + 1, 3, "ИТОГО ПО ФИЛЬТРУ:", total_fmt)
+        
+        # Столбцы: E(4)-Отклики, F(5)-Собес, G(6)-Отказы, H(7)-Молчуны
         for col_num in range(4, 8):
             col_letter = chr(ord('A') + col_num)
-            # Формула SUBTOTAL(109, ...) считает сумму только ВИДИМЫХ строк
-            # Диапазон: от 2-й строки (индекс 1) до последней строки с данными
+            # 109 - это код функции SUM, которая игнорирует скрытые фильтром строки
             formula = f'=SUBTOTAL(109, {col_letter}2:{col_letter}{last_row + 1})'
             worksheet.write_formula(last_row + 1, col_num, formula, total_fmt)
 
-        # 3. Закрепляем шапку
-        worksheet.freeze_panes(1, 0)
+        # 3. СОЗДАНИЕ ДИАГРАММЫ (ПИРОГ)
+        chart = workbook.add_chart({'type': 'pie'})
         
-        # 4. Автоширина колонок
+        # Настраиваем данные для диаграммы
+        # Категории: заголовки "Собес", "Отказы", "Молчуны" (столбцы F, G, H)
+        # Значения: ячейки из итоговой строки (last_row + 1)
+        chart.add_series({
+            'name':       'Конверсия откликов',
+            'categories': ['Отчет', 0, 5, 0, 7], # Заголовки F1:H1
+            'values':     ['Отчет', last_row + 1, 5, last_row + 1, 7], # Итоги F:H
+            'data_labels': {
+                'percentage': True, 
+                'position': 'outside_end',
+                'font': {'color': 'black'}
+            },
+        })
+        
+        chart.set_title({'name': 'Распределение результатов (по фильтру)'})
+        chart.set_style(10) # Приятный современный стиль
+        
+        # Вставляем диаграмму справа от таблицы (в ячейку J2)
+        worksheet.insert_chart('J2', chart, {'x_offset': 10, 'y_offset': 10})
+
+        # 4. Настройки отображения
+        worksheet.freeze_panes(1, 0)
         for i, col in enumerate(df.columns):
             max_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
             worksheet.set_column(i, i, max_len)
@@ -176,7 +193,7 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
     filename = f"HR_Report_{start_date}_{end_date}.xlsx"
     await message.answer_document(
         BufferedInputFile(output.read(), filename=filename),
-        caption=f"📊 Готово! Используйте фильтры в Excel.\nСумма внизу (строка {last_row + 2}) будет меняться сама."
+        caption=f"📊 Аналитический отчет готов!\n\nДиаграмма и сумма внизу динамически меняются при использовании фильтров."
     )
     await msg_wait.delete()
     await state.clear()
