@@ -87,7 +87,7 @@ class Candidate(Base):
     age = Column(Integer)
     citizenship = Column(String(100))
     phone_number = Column(String(50), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=text("now() + interval '3 hours'"))
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
     city = Column(String(255), nullable=True) # Поле с прошлого шага
     
     # --- ДОБАВЬТЕ ЭТУ СТРОКУ ---
