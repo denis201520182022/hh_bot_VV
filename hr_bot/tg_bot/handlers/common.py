@@ -27,26 +27,57 @@ router = Router()
 class ExportStates(StatesGroup):
     waiting_for_range = State()
 
+
 def _build_7day_stats_content(db_session: Session) -> Text:
-    content_parts = [Bold("📊 Статистика за последние 7 дней:"), "\n\n"]
+    content_parts = [Bold("📊 Статистика за последние 7 дней:"), "\n", Italic("(по дате отклика)"), "\n\n"]
+    
+    # Генерируем список последних 7 дней
     days = [date.today() - timedelta(days=i) for i in range(7)]
     has_any_data = False
+
     for day in days:
-        res = db_session.query(func.sum(Statistic.responses_count)).filter(Statistic.date == day).scalar() or 0
-        sil = db_session.query(func.count(InactiveNotificationQueue.id)).filter(cast(InactiveNotificationQueue.created_at, Date) == day).scalar() or 0
-        rej = db_session.query(func.count(RejectedNotificationQueue.id)).filter(cast(RejectedNotificationQueue.created_at, Date) == day).scalar() or 0
-        qual = db_session.query(func.count(NotificationQueue.id)).filter(cast(NotificationQueue.created_at, Date) == day).scalar() or 0
+        # 1. ВСЕГО ОТКЛИКОВ (берем из Dialogue, чтобы база была единой с остальными цифрами)
+        res = db_session.query(func.count(Dialogue.id)).filter(
+            cast(Dialogue.response_created_at, Date) == day
+        ).scalar() or 0
+
+        # 2. МОЛЧУНЫ (считаем записи в InactiveQueue, привязанные к диалогам за этот день)
+        sil = db_session.query(func.count(InactiveNotificationQueue.id)).join(
+            Dialogue, InactiveNotificationQueue.dialogue_id == Dialogue.id
+        ).filter(
+            cast(Dialogue.response_created_at, Date) == day
+        ).scalar() or 0
+
+        # 3. ОТКАЗНИКИ (считаем записи в RejectedQueue, привязанные к диалогам за этот день)
+        rej = db_session.query(func.count(RejectedNotificationQueue.id)).join(
+            Dialogue, RejectedNotificationQueue.dialogue_id == Dialogue.id
+        ).filter(
+            cast(Dialogue.response_created_at, Date) == day
+        ).scalar() or 0
+
+        # 4. ПОДОШЕДШИЕ / СОБЕСЫ (считаем записи в NotificationQueue через Candidate)
+        qual = db_session.query(func.count(NotificationQueue.id)).join(
+            Dialogue, NotificationQueue.candidate_id == Dialogue.candidate_id
+        ).filter(
+            cast(Dialogue.response_created_at, Date) == day
+        ).scalar() or 0
+
         if any([res, sil, rej, qual]):
             has_any_data = True
+            day_str = day.strftime('%d.%m (%a)')
             content_parts.extend([
-                Bold(f"📅 {day.strftime('%d.%m (%a)')}"), "\n",
-                "  📩 Откликов: ", Bold(res), "\n",
-                "   Подошло: ", Bold(qual), "\n",
-                "   Отказов: ", Bold(rej), "\n",
-                "   Молчунов: ", Bold(sil), "\n",
+                Bold(f"📅 {day_str}"), "\n",
+                "   Откликов: ", Bold(res), "\n",
+                "   - Подошло: ", Bold(qual), "\n",
+                "   - Отказов: ", Bold(rej), "\n",
+                "   - Молчунов: ", Bold(sil), "\n",
                 "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             ])
-    return Text(*content_parts) if has_any_data else Text("📊 Данных за 7 дней нет.")
+
+    if not has_any_data:
+        return Text("📊 Данных за 7 дней пока нет.")
+
+    return Text(*content_parts)
 
 @router.message(CommandStart())
 async def handle_start(message: Message, db_session: Session):
@@ -219,26 +250,58 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
         fmt_num = workbook.add_format({'border': 1, 'align': 'center'})
         fmt_total = workbook.add_format({'bold': True, 'bg_color': '#F4CCCC', 'border': 1, 'align': 'center'}) # Розоватый итог
         fmt_blue = workbook.add_format({'bold': True, 'bg_color': '#CFE2F3', 'font_color': 'black', 'border': 1, 'align': 'center'})
-
+        fmt_total_perc = workbook.add_format({
+            'bold': True, 
+            'bg_color': '#F4CCCC', 
+            'border': 1, 
+            'align': 'center', 
+            'num_format': '0.0%' # <--- Это добавит проценты в строку ИТОГО
+        })
         # Стилизуем сводные листы
-        for sheet_name in ['Свод по датам', 'Свод по рекрутерам', 'Свод по городам', 'Свод по вакансиям']:
+        for sheet_name, current_df in [
+            ('Свод по датам', df_date), 
+            ('Свод по рекрутерам', df_rec), 
+            ('Свод по городам', df_city), 
+            ('Свод по вакансиям', df_vac)
+        ]:
             ws = writer.sheets[sheet_name]
-            # Шапка
-            for col_num, value in enumerate(df_date.columns.values):
+            last_row_idx = len(current_df) - 1 # Индекс строки ИТОГО
+            
+            # Настраиваем каждую колонку индивидуально
+            for i, col in enumerate(current_df.columns):
+                # Считаем максимальную длину контента в колонке для автоширины
+                max_len = max(
+                    current_df[col].astype(str).map(len).max(), 
+                    len(col)
+                ) + 3
+                
+                # Определяем, какой формат использовать для колонки
+                # Колонки с I по O (индексы 8-14) — это проценты
+                is_perc_col = 8 <= i <= 14
+                col_fmt = fmt_perc if is_perc_col else fmt_num
+                
+                ws.set_column(i, i, max_len, col_fmt)
+                
+                # ПЕРЕЗАПИСЫВАЕМ ЯЧЕЙКУ ИТОГО ДЛЯ ПРОЦЕНТНЫХ КОЛОНОК
+                if is_perc_col:
+                    val = current_df.iloc[last_row_idx, i]
+                    ws.write(last_row_idx + 1, i, val, fmt_total_perc)
+            
+            # Красим всю остальную строку ИТОГО (для обычных чисел)
+            ws.set_row(last_row_idx + 1, None, fmt_total)
+            
+            # Шапка (поверх всего)
+            for col_num, value in enumerate(current_df.columns.values):
                 ws.write(0, col_num, value, fmt_header)
-            # Колонки
-            ws.set_column('A:A', 25, fmt_num)
-            ws.set_column('B:H', 12, fmt_num)
-            ws.set_column('I:O', 16, fmt_perc)
-            # Итоговая строка
-            last_row = len(df_date) if sheet_name == 'Свод по датам' else (len(df_rec) if sheet_name == 'Свод по рекрутерам' else (len(df_city) if sheet_name == 'Свод по городам' else len(df_vac)))
-            ws.set_row(last_row, None, fmt_total)
 
         # Стилизуем лист Отчет
         ws_rep = writer.sheets['Отчет']
         for col_num, value in enumerate(df_base.columns.values):
             ws_rep.write(0, col_num, value, fmt_blue)
-        ws_rep.set_column('A:K', 18, fmt_num)
+        ws_rep = writer.sheets['Отчет']
+        for i, col in enumerate(df_base.columns):
+            max_len = max(df_base[col].astype(str).map(len).max(), len(col)) + 3
+            ws_rep.set_column(i, i, max_len, fmt_num)
         ws_rep.freeze_panes(1, 0)
 
     output.seek(0)
