@@ -98,102 +98,131 @@ async def export_range_manual(message: Message, state: FSMContext, db_session: S
         await generate_and_send_excel(message, start_date, end_date, db_session, state)
     except Exception:
         await message.answer("❌ Неверный формат. Пример: 01.12.2025 - 10.12.2025")
+
+
 async def generate_and_send_excel(message: Message, start_date: date, end_date: date, db: Session, state: FSMContext):
-    msg_wait = await message.answer("⏳ Формирую отчет с графиками...")
+    msg_wait = await message.answer("⏳ Собираю когортный отчет (лист 'Отчет')...")
     
-    data = []
-    current_day = start_date
-    while current_day <= end_date:
-        results = db.query(
-            TrackedRecruiter.name.label("recruiter"),
-            Vacancy.city.label("city"),
-            Vacancy.title.label("vacancy"),
-            Vacancy.id.label("v_id")
-        ).join(Vacancy, Vacancy.recruiter_id == TrackedRecruiter.id).all()
+    # 1. Получаем все диалоги, где дата ОТКЛИКА (response_created_at) попадает в диапазон
+    # Нам нужны сразу связи с вакансией, рекрутером и всеми очередями уведомлений
+    query = db.query(Dialogue).filter(
+        cast(Dialogue.response_created_at, Date) >= start_date,
+        cast(Dialogue.response_created_at, Date) <= end_date
+    )
+    dialogues = query.all()
 
-        for row in results:
-            resp = db.query(Statistic.responses_count).filter(Statistic.vacancy_id == row.v_id, Statistic.date == current_day).scalar() or 0
-            sil = db.query(func.count(InactiveNotificationQueue.id)).join(Dialogue).filter(Dialogue.vacancy_id == row.v_id, cast(InactiveNotificationQueue.created_at, Date) == current_day).scalar() or 0
-            rej = db.query(func.count(RejectedNotificationQueue.id)).join(Dialogue).filter(Dialogue.vacancy_id == row.v_id, cast(RejectedNotificationQueue.created_at, Date) == current_day).scalar() or 0
-            qual = db.query(func.count(NotificationQueue.id)).join(Dialogue, Dialogue.candidate_id == NotificationQueue.candidate_id).filter(Dialogue.vacancy_id == row.v_id, cast(NotificationQueue.created_at, Date) == current_day).scalar() or 0
-
-            if any([resp, sil, rej, qual]):
-                data.append({
-                    "Дата": current_day.strftime("%d.%m.%Y"),
-                    "Рекрутер": row.recruiter,
-                    "Город": row.city,
-                    "Вакансия": row.vacancy,
-                    "Отклики": resp,
-                    "Собес": qual,
-                    "Отказы": rej,
-                    "Молчуны": sil
-                })
-        current_day += timedelta(days=1)
-
-    if not data:
-        await msg_wait.edit_text("🤷 Данных не найдено.")
+    if not dialogues:
+        await msg_wait.edit_text("🤷 За этот период откликов не найдено.")
         await state.clear()
         return
 
-    df = pd.DataFrame(data)
+    # Структура для агрегации данных: {(дата, рекрутер, город, вакансия): {метрики}}
+    report_data = {}
+
+    for d in dialogues:
+        # Определяем ключи группировки
+        dt = d.response_created_at.strftime("%d.%m.%Y")
+        recruiter_name = d.recruiter.name if d.recruiter else "Не указан"
+        city = d.vacancy.city if d.vacancy else "Не указан"
+        vacancy_title = d.vacancy.title if d.vacancy else "Не указана"
+        key = (dt, recruiter_name, city, vacancy_title)
+
+        if key not in report_data:
+            report_data[key] = {
+                "отклики": 0, "начали_диалог": 0, "собес": 0, 
+                "отказался_кд": 0, "отказали_мы": 0, "молчуны": 0
+            }
+
+        # Метрика 1: Всего откликов
+        report_data[key]["отклики"] += 1
+
+        # Метрика 2: Начали диалог (проверка истории)
+        # Логика: есть роль 'user' и в контенте НЕТ '[SYSTEM COMMAND]'
+        history = d.history or []
+        started = any(
+            isinstance(m, dict) and 
+            m.get('role') == 'user' and 
+            '[SYSTEM COMMAND]' not in m.get('content', '') 
+            for m in history
+        )
+        if started:
+            report_data[key]["начали_диалог"] += 1
+
+        # Метрика 3: Собес (проверка наличия в NotificationQueue)
+        # У диалога есть связь NotificationQueue (загружаем через d.candidate.notification_queue или напрямую)
+        if d.status == 'qualified':
+             report_data[key]["собес"] += 1
+
+        # Метрика 4: Отказался КД (dialogue_state == 'declined_vacancy')
+        if d.dialogue_state == 'declined_vacancy':
+            report_data[key]["отказался_кд"] += 1
+
+        # Метрика 5: Отказали мы (status == 'qualification_failed')
+        if d.dialogue_state == 'qualification_failed':
+            report_data[key]["отказали_мы"] += 1
+
+        # Метрика 6: Молчуны (диалог когда-либо попадал в InactiveNotificationQueue)
+        if d.inactive_alerts:
+            report_data[key]["молчуны"] += 1
+
+    # Преобразуем словарь в плоский список для DataFrame
+    final_rows = []
+    for (dt, rec, cit, vac), m in report_data.items():
+        total_rejects = m["отказался_кд"] + m["отказали_мы"]
+        final_rows.append({
+            "Дата": dt,
+            "Рекрутер": rec,
+            "Город": cit,
+            "Вакансия": vac,
+            "Отклики": m["отклики"],
+            "начали диалог": m["начали_диалог"],
+            "Собес": m["собес"],
+            "Отказался КД": m["отказался_кд"],
+            "Отказали мы": m["отказали_мы"],
+            "Молчуны": m["молчуны"],
+            "Отказы": total_rejects
+        })
+
+    # Сортируем данные: сначала дата, потом рекрутер
+    df = pd.DataFrame(final_rows)
+    df['dt_obj'] = pd.to_datetime(df['Дата'], format='%d.%m.%Y')
+    df = df.sort_values(by=['dt_obj', 'Рекрутер'], ascending=[True, True]).drop(columns=['dt_obj'])
+
+    # 2. Создаем Excel
     output = io.BytesIO()
-    
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Отчет')
         workbook  = writer.book
         worksheet = writer.sheets['Отчет']
-        
-        # Стили
-        total_fmt = workbook.add_format({'bold': True, 'bg_color': '#FCE4D6', 'border': 1})
-        last_row = len(df)
-        
-        # 1. Фильтры
-        worksheet.autofilter(0, 0, last_row, len(df.columns) - 1)
-        
-        # 2. Итоговая строка с умными формулами SUBTOTAL
-        worksheet.write(last_row + 1, 3, "ИТОГО ПО ФИЛЬТРУ:", total_fmt)
-        
-        # Столбцы: E(4)-Отклики, F(5)-Собес, G(6)-Отказы, H(7)-Молчуны
-        for col_num in range(4, 8):
-            col_letter = chr(ord('A') + col_num)
-            # 109 - это код функции SUM, которая игнорирует скрытые фильтром строки
-            formula = f'=SUBTOTAL(109, {col_letter}2:{col_letter}{last_row + 1})'
-            worksheet.write_formula(last_row + 1, col_num, formula, total_fmt)
 
-        # 3. СОЗДАНИЕ ДИАГРАММЫ (ПИРОГ)
-        chart = workbook.add_chart({'type': 'pie'})
-        
-        # Настраиваем данные для диаграммы
-        # Категории: заголовки "Собес", "Отказы", "Молчуны" (столбцы F, G, H)
-        # Значения: ячейки из итоговой строки (last_row + 1)
-        chart.add_series({
-            'name':       'Конверсия откликов',
-            'categories': ['Отчет', 0, 5, 0, 7], # Заголовки F1:H1
-            'values':     ['Отчет', last_row + 1, 5, last_row + 1, 7], # Итоги F:H
-            'data_labels': {
-                'percentage': True, 
-                'position': 'outside_end',
-                'font': {'color': 'black'}
-            },
+        # Стилизация под шаблон
+        header_format = workbook.add_format({
+            'bold': True, 
+            'bg_color': '#4F81BD', # Синий цвет как на скрине
+            'font_color': 'white',
+            'border': 1,
+            'align': 'center',
+            'valign': 'vcenter'
         })
+        cell_format = workbook.add_format({'border': 1, 'align': 'center'})
         
-        chart.set_title({'name': 'Распределение результатов (по фильтру)'})
-        chart.set_style(10) # Приятный современный стиль
-        
-        # Вставляем диаграмму справа от таблицы (в ячейку J2)
-        worksheet.insert_chart('J2', chart, {'x_offset': 10, 'y_offset': 10})
+        # Применяем шапку
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+            
+        # Устанавливаем ширину и границы для всех данных
+        worksheet.set_column(0, 0, 12, cell_format) # Дата
+        worksheet.set_column(1, 1, 20, cell_format) # Рекрутер
+        worksheet.set_column(2, 3, 25, cell_format) # Город, Вакансия
+        worksheet.set_column(4, 10, 15, cell_format) # Цифры
 
-        # 4. Настройки отображения
-        worksheet.freeze_panes(1, 0)
-        for i, col in enumerate(df.columns):
-            max_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
-            worksheet.set_column(i, i, max_len)
+        worksheet.freeze_panes(1, 0) # Закрепить шапку
 
     output.seek(0)
-    filename = f"HR_Report_{start_date}_{end_date}.xlsx"
+    filename = f"HR_Complex_Report_{date.today()}.xlsx"
     await message.answer_document(
         BufferedInputFile(output.read(), filename=filename),
-        caption=f"📊 Аналитический отчет готов!\n\nДиаграмма и сумма внизу динамически меняются при использовании фильтров."
+        caption="✅ Лист 'Отчет' сформирован по когортной модели (на основе даты отклика)."
     )
     await msg_wait.delete()
     await state.clear()

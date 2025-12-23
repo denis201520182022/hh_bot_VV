@@ -711,7 +711,7 @@ def _generate_calendar_context() -> str:
         f"{calendar_string}\n\n"
         f"ПРАВИЛА РАБОТЫ С ДАТАМИ:\n"
         f"1. Если кандидат говорит конкретный день недели БЕЗ уточнений (например, просто 'понедельник'):\n"
-        f"   → Бери ПЕРВЫЙ такой день из списка выше\n\n"
+        f"   → Бери ПЕРВЫЙ такой день (то есть ближайший) из списка выше\n\n"
         f"2. Если кандидат говорит 'СЛЕДУЮЩИЙ [день недели]' (например, 'следующий понедельник'):\n"
         f"   → Бери ВТОРОЙ такой день из списка выше\n\n"
         f"3. Если кандидат называет день недели, который совпадает с СЕГОДНЯ:\n"
@@ -812,7 +812,8 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             options=[
                 selectinload(Dialogue.vacancy),
                 selectinload(Dialogue.candidate),
-                selectinload(Dialogue.rejected_alerts)
+                selectinload(Dialogue.rejected_alerts),
+                selectinload(Dialogue.inactive_alerts)
             ]
         )
 
@@ -1449,31 +1450,34 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             # Проверяем, существует ли уже запись RejectedNotificationQueue для этого диалога.
             # `dialogue.rejected_alerts` будет либо объектом RejectedNotificationQueue, либо None,
             # благодаря `uselist=False` в relationship.
-            if dialogue.rejected_alerts:
-                # Запись уже существует. Если статус не 'pending', обновляем его.
-                if dialogue.rejected_alerts.status != 'pending':
-                    logger.debug(
-                        f"Уведомление об отклоненном кандидате для диалога {dialogue.hh_response_id} "
-                        f"уже существует со статусом '{dialogue.rejected_alerts.status}'. Обновляю статус на 'pending'."
-                    )
-                    dialogue.rejected_alerts.status = 'pending'
-                    dialogue.rejected_alerts.processed_at = None # Сбросим время обработки при переходе в pending
-                    db.add(dialogue.rejected_alerts) # Добавляем для сохранения изменений
-                else:
-                    logger.debug(
-                        f"Уведомление об отклоненном кандидате для диалога {dialogue.hh_response_id} "
-                        f"уже существует в RejectedNotificationQueue со статусом 'pending'.")
+            if dialogue.inactive_alerts:
+                logger.info(f"[{dialogue.hh_response_id}] Кандидат уже в таблице молчунов. Пропускаю запись в отказники.")
             else:
-                # Записи не существует, создаем новую
-                new_rejected_alert = RejectedNotificationQueue(
-                    dialogue_id=dialogue.id,
-                    status='pending'
-                )
-                db.add(new_rejected_alert)
-                logger.info(
-                    f"Добавлено уведомление об отклоненном кандидате (диалог {dialogue.hh_response_id}) "
-                    f"в RejectedNotificationQueue."
-                )
+                if dialogue.rejected_alerts:
+                    # Запись уже существует. Если статус не 'pending', обновляем его.
+                    if dialogue.rejected_alerts.status != 'pending':
+                        logger.debug(
+                            f"Уведомление об отклоненном кандидате для диалога {dialogue.hh_response_id} "
+                            f"уже существует со статусом '{dialogue.rejected_alerts.status}'. Обновляю статус на 'pending'."
+                        )
+                        dialogue.rejected_alerts.status = 'pending'
+                        dialogue.rejected_alerts.processed_at = None # Сбросим время обработки при переходе в pending
+                        db.add(dialogue.rejected_alerts) # Добавляем для сохранения изменений
+                    else:
+                        logger.debug(
+                            f"Уведомление об отклоненном кандидате для диалога {dialogue.hh_response_id} "
+                            f"уже существует в RejectedNotificationQueue со статусом 'pending'.")
+                else:
+                    # Записи не существует, создаем новую
+                    new_rejected_alert = RejectedNotificationQueue(
+                        dialogue_id=dialogue.id,
+                        status='pending'
+                    )
+                    db.add(new_rejected_alert)
+                    logger.info(
+                        f"Добавлено уведомление об отклоненном кандидате (диалог {dialogue.hh_response_id}) "
+                        f"в RejectedNotificationQueue."
+                    )
             # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА КОДА ---
 
 
@@ -1729,54 +1733,57 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                 # Выполнение действия
                 if should_timeout:
-                    # Таймаут
-                    if dialogue.inactive_alerts:
-                        if dialogue.inactive_alerts.status != 'pending':
-                            dialogue.inactive_alerts.status = 'pending'
-                            dialogue.inactive_alerts.processed_at = None
-                    else:
+                    # ТВОЕ ТРЕБОВАНИЕ: Если запись уже есть, ничего не делаем с таблицей молчунов
+                    if not dialogue.inactive_alerts:
                         db.add(InactiveNotificationQueue(dialogue_id=dialogue.id, status='pending'))
+                        logger.info(f"Диалог {dialogue_hh_id} впервые добавлен в InactiveNotificationQueue.")
+                    else:
+                        logger.debug(f"Диалог {dialogue_hh_id} уже зафиксирован в таблице молчунов. Повторная запись не требуется.")
 
+                    # Но статус самого диалога и уровень напоминания обновляем в любом случае,
+                    # чтобы пошел отсчет 7 дней для уровня 4.
                     dialogue.status = 'timed_out'
                     dialogue.reminder_level = 3
                     dialogue.last_updated = now
-                    logger.info(f"Диалог {dialogue_hh_id} переведен в статус 'timed_out'.")
                     await db.commit()
 
                 elif reminder_messages:
-                    # Отправка напоминаний (цикл для поддержки нескольких сообщений)
-                    logger.info(f"Отправка напоминания уровня {next_level} ({len(reminder_messages)} сообщений) для диалога {dialogue_hh_id}.")
+                    logger.info(f"Отправка напоминания уровня {next_level} для диалога {dialogue_hh_id}.")
 
-                    all_sent = True
-                    # 1. Перед отправкой сообщения добавляем проверку тарификации
-                    is_long_reminder = next_level in [4,] # Уровни после таймаута
+                    # 1. Определяем типы напоминаний
+                    is_long_reminder = next_level in [4, 5, 6]
+                    # ТВОЕ ТРЕБОВАНИЕ: Списываем деньги только один раз (при переходе на 4 уровень)
+                    should_charge = (next_level == 4) 
+                    
+                    settings = None
 
-                    if is_long_reminder:
-                        # Проверяем баланс перед отправкой
+                    # 2. Проверяем баланс только если это ПЕРВОЕ долгое напоминание
+                    if should_charge:
                         settings_res = await db.execute(select(AppSettings).filter_by(id=1))
                         settings = settings_res.scalar_one_or_none()
                         
                         if not settings or settings.balance < settings.cost_per_long_reminder:
-                            logger.warning(f"Баланс пуст. Долгое напоминание для {dialogue_hh_id} отменено.")
-                            return # Не шлем сообщение, если нет денег
+                            logger.warning(f"Баланс пуст. Первое долгое напоминание для {dialogue_hh_id} отменено.")
+                            return 
+
+                    all_sent = True
                     for msg in reminder_messages:
                         status_code = await hh_api.send_message(recruiter, db, dialogue_hh_id, msg)
 
                         if status_code == 200:
-                            # 1. Формируем стандартную запись о сообщении бота
+                            # Записываем сообщение в историю
                             new_history_entry = {
                                 'role': 'assistant', 
                                 'content': msg,
                                 'timestamp_msk': datetime.datetime.now(SPB_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S MSK')
                             }
-                            
                             current_history = list(dialogue.history) if dialogue.history else []
                             current_history.append(new_history_entry)
 
-                            # 2. ДОБАВЛЯЕМ СИСТЕМНУЮ ИНСТРУКЦИЮ (только для долгих напоминалок)
+                            # Добавляем системную команду (для всех уровней 4, 5, 6)
                             if is_long_reminder:
                                 system_instruction = {
-                                    'role': 'user', # Используем user + пометка, чтобы LLM восприняла это как ввод
+                                    'role': 'user',
                                     'content': (
                                         "[SYSTEM COMMAND] если кандидат ответит после этого сообщения, то ты должен "
                                         "продолжить диалог по плану разговора, опираясь на текущее состояние (state), "
@@ -1785,14 +1792,16 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                                 }
                                 current_history.append(system_instruction)
                             
-                            # Ограничиваем историю и сохраняем
                             dialogue.history = current_history[-150:]
-                            if is_long_reminder:
+
+                            # 3. СПИСЫВАЕМ ДЕНЬГИ (только если это уровень 4)
+                            if should_charge and settings:
                                 settings.balance -= settings.cost_per_long_reminder
-                                logger.info(f"Списано {settings.cost_per_long_reminder} руб. за долгое напоминание Lvl {next_level}")
+                                logger.info(f"ЕДИНОВРЕМЕННОЕ СПИСАНИЕ: {settings.cost_per_long_reminder} руб. за активацию долгих напоминаний.")
+
                         elif status_code == 403:
                              # Вакансия закрыта или доступ запрещен
-                             dialogue.reminder_level = 3
+                             dialogue.reminder_level = 6
                              dialogue.status = 'vacancy_closed'
                              await db.commit()
                              all_sent = False
