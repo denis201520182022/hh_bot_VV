@@ -98,13 +98,10 @@ async def export_range_manual(message: Message, state: FSMContext, db_session: S
         await generate_and_send_excel(message, start_date, end_date, db_session, state)
     except Exception:
         await message.answer("❌ Неверный формат. Пример: 01.12.2025 - 10.12.2025")
-
-
 async def generate_and_send_excel(message: Message, start_date: date, end_date: date, db: Session, state: FSMContext):
-    msg_wait = await message.answer("⏳ Собираю когортный отчет (лист 'Отчет')...")
+    msg_wait = await message.answer("⏳ Собираю данные и формирую все сводные таблицы. Это может занять до минуты...")
     
-    # 1. Получаем все диалоги, где дата ОТКЛИКА (response_created_at) попадает в диапазон
-    # Нам нужны сразу связи с вакансией, рекрутером и всеми очередями уведомлений
+    # 1. СБОР СЫРЫХ ДАННЫХ (Лист "Отчет")
     query = db.query(Dialogue).filter(
         cast(Dialogue.response_created_at, Date) >= start_date,
         cast(Dialogue.response_created_at, Date) <= end_date
@@ -116,113 +113,128 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
         await state.clear()
         return
 
-    # Структура для агрегации данных: {(дата, рекрутер, город, вакансия): {метрики}}
-    report_data = {}
-
+    report_map = {}
     for d in dialogues:
-        # Определяем ключи группировки
         dt = d.response_created_at.strftime("%d.%m.%Y")
-        recruiter_name = d.recruiter.name if d.recruiter else "Не указан"
-        city = d.vacancy.city if d.vacancy else "Не указан"
-        vacancy_title = d.vacancy.title if d.vacancy else "Не указана"
-        key = (dt, recruiter_name, city, vacancy_title)
+        rec = d.recruiter.name if d.recruiter else "Не указан"
+        cit = d.vacancy.city if d.vacancy else "Не указан"
+        vac = d.vacancy.title if d.vacancy else "Не указана"
+        key = (dt, rec, cit, vac)
 
-        if key not in report_data:
-            report_data[key] = {
-                "отклики": 0, "начали_диалог": 0, "собес": 0, 
-                "отказался_кд": 0, "отказали_мы": 0, "молчуны": 0
+        if key not in report_map:
+            report_map[key] = {
+                "Отклики": 0, "начали диалог": 0, "Собес": 0, 
+                "Отказался КД": 0, "Отказали мы": 0, "Молчуны": 0
             }
 
-        # Метрика 1: Всего откликов
-        report_data[key]["отклики"] += 1
-
-        # Метрика 2: Начали диалог (проверка истории)
-        # Логика: есть роль 'user' и в контенте НЕТ '[SYSTEM COMMAND]'
+        m = report_map[key]
+        m["Отклики"] += 1
+        
+        # Проверка начала диалога (реплика юзера без системной команды)
         history = d.history or []
-        started = any(
-            isinstance(m, dict) and 
-            m.get('role') == 'user' and 
-            '[SYSTEM COMMAND]' not in m.get('content', '') 
-            for m in history
-        )
-        if started:
-            report_data[key]["начали_диалог"] += 1
+        if any(isinstance(h, dict) and h.get('role') == 'user' and '[SYSTEM COMMAND]' not in h.get('content', '') for h in history):
+            m["начали диалог"] += 1
 
-        # Метрика 3: Собес (проверка наличия в NotificationQueue)
-        # У диалога есть связь NotificationQueue (загружаем через d.candidate.notification_queue или напрямую)
-        if d.status == 'qualified':
-             report_data[key]["собес"] += 1
+        if d.status == 'qualified': m["Собес"] += 1
+        if d.dialogue_state == 'declined_vacancy': m["Отказался КД"] += 1
+        if d.dialogue_state == 'qualification_failed': m["Отказали мы"] += 1
+        if d.inactive_alerts: m["Молчуны"] += 1
 
-        # Метрика 4: Отказался КД (dialogue_state == 'declined_vacancy')
-        if d.dialogue_state == 'declined_vacancy':
-            report_data[key]["отказался_кд"] += 1
-
-        # Метрика 5: Отказали мы (status == 'qualification_failed')
-        if d.dialogue_state == 'qualification_failed':
-            report_data[key]["отказали_мы"] += 1
-
-        # Метрика 6: Молчуны (диалог когда-либо попадал в InactiveNotificationQueue)
-        if d.inactive_alerts:
-            report_data[key]["молчуны"] += 1
-
-    # Преобразуем словарь в плоский список для DataFrame
-    final_rows = []
-    for (dt, rec, cit, vac), m in report_data.items():
-        total_rejects = m["отказался_кд"] + m["отказали_мы"]
-        final_rows.append({
-            "Дата": dt,
-            "Рекрутер": rec,
-            "Город": cit,
-            "Вакансия": vac,
-            "Отклики": m["отклики"],
-            "начали диалог": m["начали_диалог"],
-            "Собес": m["собес"],
-            "Отказался КД": m["отказался_кд"],
-            "Отказали мы": m["отказали_мы"],
-            "Молчуны": m["молчуны"],
-            "Отказы": total_rejects
+    # Формируем основной DataFrame
+    rows = []
+    for (dt, rec, cit, vac), m in report_map.items():
+        rows.append({
+            "Дата": dt, "Рекрутер": rec, "Город": cit, "Вакансия": vac,
+            "Отклики": m["Отклики"], "начали диалог": m["начали_диалог"], "Собес": m["Собес"],
+            "Отказался КД": m["Отказался_КД"], "Отказали мы": m["Отказали_мы"], "Молчуны": m["Молчуны"],
+            "Отказы всего": m["Отказался_КД"] + m["Отказали_мы"]
         })
 
-    # Сортируем данные: сначала дата, потом рекрутер
-    df = pd.DataFrame(final_rows)
-    df['dt_obj'] = pd.to_datetime(df['Дата'], format='%d.%m.%Y')
-    df = df.sort_values(by=['dt_obj', 'Рекрутер'], ascending=[True, True]).drop(columns=['dt_obj'])
+    df_base = pd.DataFrame(rows)
+    df_base['dt_obj'] = pd.to_datetime(df_base['Дата'], format='%d.%m.%Y')
+    df_base = df_base.sort_values(['dt_obj', 'Рекрутер']).drop(columns=['dt_obj'])
 
-    # 2. Создаем Excel
+    # 2. ФУНКЦИЯ ДЛЯ СОЗДАНИЯ СВОДНЫХ ЛИСТОВ
+    def create_summary_df(groupby_col):
+        summary = df_base.groupby(groupby_col).agg({
+            'Отклики': 'sum', 'начали диалог': 'sum', 'Собес': 'sum',
+            'Отказался КД': 'sum', 'Отказали мы': 'sum', 'Молчуны': 'sum', 'Отказы всего': 'sum'
+        }).reset_index()
+
+        # Расчет конверсий
+        summary['Диалог/Отклик'] = summary['начали диалог'] / summary['Отклики']
+        summary['Собес/отклик'] = summary['Собес'] / summary['Отклики']
+        summary['Отказался КД/Отклик'] = summary['Отказался КД'] / summary['Отклики']
+        summary['Отказали мы/Отклик'] = summary['Отказали мы'] / summary['Отклики']
+        summary['Молчуны/отклик'] = summary['Молчуны'] / summary['Отклики']
+        summary['Молчуны/Диалог'] = summary['Молчуны'] / summary['начали диалог']
+        summary['Отказы всего/Диалог'] = summary['Отказы всего'] / summary['начали диалог']
+
+        # Строка ИТОГО
+        total = summary.sum(numeric_only=True)
+        total[groupby_col] = 'ИТОГО'
+        # Пересчет средневзвешенных процентов
+        total['Диалог/Отклик'] = total['начали диалог'] / total['Отклики']
+        total['Собес/отклик'] = total['Собес'] / total['Отклики']
+        total['Отказался КД/Отклик'] = total['Отказался КД'] / total['Отклики']
+        total['Отказали мы/Отклик'] = total['Отказали мы'] / total['Отклики']
+        total['Молчуны/отклик'] = total['Молчуны'] / total['Отклики']
+        total['Молчуны/Диалог'] = total['Молчуны'] / total['начали диалог']
+        total['Отказы всего/Диалог'] = total['Отказы всего'] / total['начали диалог']
+        
+        return pd.concat([summary, pd.DataFrame([total])], ignore_index=True)
+
+    # Генерируем все своды
+    df_date = create_summary_df('Дата')
+    df_rec = create_summary_df('Рекрутер')
+    df_city = create_summary_df('Город')
+    df_vac = create_summary_df('Вакансия')
+
+    # 3. ЗАПИСЬ В EXCEL СО СТИЛЯМИ
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Отчет')
-        workbook  = writer.book
-        worksheet = writer.sheets['Отчет']
+        # Пишем листы
+        df_date.to_excel(writer, index=False, sheet_name='Свод по датам')
+        df_rec.to_excel(writer, index=False, sheet_name='Свод по рекрутерам')
+        df_city.to_excel(writer, index=False, sheet_name='Свод по городам')
+        df_vac.to_excel(writer, index=False, sheet_name='Свод по вакансиям')
+        df_base.to_excel(writer, index=False, sheet_name='Отчет')
 
-        # Стилизация под шаблон
-        header_format = workbook.add_format({
-            'bold': True, 
-            'bg_color': '#4F81BD', # Синий цвет как на скрине
-            'font_color': 'white',
-            'border': 1,
-            'align': 'center',
-            'valign': 'vcenter'
-        })
-        cell_format = workbook.add_format({'border': 1, 'align': 'center'})
+        workbook = writer.book
         
-        # Применяем шапку
-        for col_num, value in enumerate(df.columns.values):
-            worksheet.write(0, col_num, value, header_format)
-            
-        # Устанавливаем ширину и границы для всех данных
-        worksheet.set_column(0, 0, 12, cell_format) # Дата
-        worksheet.set_column(1, 1, 20, cell_format) # Рекрутер
-        worksheet.set_column(2, 3, 25, cell_format) # Город, Вакансия
-        worksheet.set_column(4, 10, 15, cell_format) # Цифры
+        # Форматы
+        fmt_header = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'}) # Зеленоватый
+        fmt_perc = workbook.add_format({'num_format': '0.0%', 'border': 1, 'align': 'center'})
+        fmt_num = workbook.add_format({'border': 1, 'align': 'center'})
+        fmt_total = workbook.add_format({'bold': True, 'bg_color': '#F4CCCC', 'border': 1, 'align': 'center'}) # Розоватый итог
+        fmt_blue = workbook.add_format({'bold': True, 'bg_color': '#CFE2F3', 'font_color': 'black', 'border': 1, 'align': 'center'})
 
-        worksheet.freeze_panes(1, 0) # Закрепить шапку
+        # Стилизуем сводные листы
+        for sheet_name in ['Свод по датам', 'Свод по рекрутерам', 'Свод по городам', 'Свод по вакансиям']:
+            ws = writer.sheets[sheet_name]
+            # Шапка
+            for col_num, value in enumerate(df_date.columns.values):
+                ws.write(0, col_num, value, fmt_header)
+            # Колонки
+            ws.set_column('A:A', 25, fmt_num)
+            ws.set_column('B:H', 12, fmt_num)
+            ws.set_column('I:O', 16, fmt_perc)
+            # Итоговая строка
+            last_row = len(df_date) if sheet_name == 'Свод по датам' else (len(df_rec) if sheet_name == 'Свод по рекрутерам' else (len(df_city) if sheet_name == 'Свод по городам' else len(df_vac)))
+            ws.set_row(last_row, None, fmt_total)
+
+        # Стилизуем лист Отчет
+        ws_rep = writer.sheets['Отчет']
+        for col_num, value in enumerate(df_base.columns.values):
+            ws_rep.write(0, col_num, value, fmt_blue)
+        ws_rep.set_column('A:K', 18, fmt_num)
+        ws_rep.freeze_panes(1, 0)
 
     output.seek(0)
-    filename = f"HR_Complex_Report_{date.today()}.xlsx"
+    filename = f"HR_Global_Report_{date.today()}.xlsx"
     await message.answer_document(
         BufferedInputFile(output.read(), filename=filename),
-        caption="✅ Лист 'Отчет' сформирован по когортной модели (на основе даты отклика)."
+        caption=f"📊 Готов детальный отчет за период:\n{start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}"
     )
     await msg_wait.delete()
     await state.clear()
