@@ -1716,7 +1716,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                 # --- НОВЫЕ УРОВНИ ---
                 elif dialogue.reminder_level == 3 and time_since_update > datetime.timedelta(days=7):
-                    reminder_messages = ["Добрый день. Если вы еще находитесь в поиске работы, ты будем рады пригласить вас пройти собеседование. Готовы продолжить диалог?"]
+                    reminder_messages = ["Добрый день. Если вы еще находитесь в поиске работы, то будем рады пригласить вас пройти собеседование. Готовы продолжить диалог?"]
                     next_level = 4
 
                 elif dialogue.reminder_level == 4 and time_since_update > datetime.timedelta(days=21):
@@ -1724,7 +1724,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     next_level = 5
 
                 elif dialogue.reminder_level == 5 and time_since_update > datetime.timedelta(days=51):
-                    reminder_messages = ["Еще раз добрый день. Как ваши дела? Хотели бы сообщить вам, что вакансия вновь актуальна и если вы в поиске или задумываетесь о смене работы, мы с удовольствием пригласили вас на собеседование"]
+                    reminder_messages = ["Еще раз добрый день. Как ваши дела? Хотели бы сообщить вам, что вакансия вновь актуальна и если вы в поиске или задумываетесь о смене работы, мы с удовольствием пригласили бы вас на собеседование"]
                     next_level = 6
 
                 # Выполнение действия
@@ -1763,10 +1763,29 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                         status_code = await hh_api.send_message(recruiter, db, dialogue_hh_id, msg)
 
                         if status_code == 200:
-                            # Обновляем историю для каждого сообщения
-                            new_history_entry = {'role': 'assistant', 'content': msg}
+                            # 1. Формируем стандартную запись о сообщении бота
+                            new_history_entry = {
+                                'role': 'assistant', 
+                                'content': msg,
+                                'timestamp_msk': datetime.datetime.now(SPB_TIMEZONE).strftime('%Y-%m-%d %H:%M:%S MSK')
+                            }
+                            
                             current_history = list(dialogue.history) if dialogue.history else []
                             current_history.append(new_history_entry)
+
+                            # 2. ДОБАВЛЯЕМ СИСТЕМНУЮ ИНСТРУКЦИЮ (только для долгих напоминалок)
+                            if is_long_reminder:
+                                system_instruction = {
+                                    'role': 'user', # Используем user + пометка, чтобы LLM восприняла это как ввод
+                                    'content': (
+                                        "[SYSTEM COMMAND] если кандидат ответит после этого сообщения, то ты должен "
+                                        "продолжить диалог по плану разговора, опираясь на текущее состояние (state), "
+                                        "и не забывай перед переходом к анкете спросить про вопросы и ответить на них!"
+                                    )
+                                }
+                                current_history.append(system_instruction)
+                            
+                            # Ограничиваем историю и сохраняем
                             dialogue.history = current_history[-150:]
                             if is_long_reminder:
                                 settings.balance -= settings.cost_per_long_reminder
