@@ -678,11 +678,13 @@ def _generate_calendar_context() -> str:
     """
     Генерирует текстовый блок с календарем и правилами работы с датами.
     """
-    current_datetime_utc = datetime.datetime.now(datetime.timezone.utc)
+    moscow_tz = ZoneInfo("Europe/Moscow")
+    current_datetime_utc = datetime.datetime.now(moscow_tz)
     weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
     current_weekday = weekdays_ru[current_datetime_utc.weekday()]
     current_date_str = current_datetime_utc.strftime("%Y-%m-%d")
+    current_time_str = current_datetime_utc.strftime("%H:%M")
 
     calendar_context_lines = []
     for i in range(14):  # Сегодня + 13 дней вперед = 14 дней
@@ -704,8 +706,9 @@ def _generate_calendar_context() -> str:
 
     calendar_context = (
         f"\n\n[CRITICAL CALENDAR CONTEXT]\n"
-        f"ТЕКУЩАЯ ДАТА И ВРЕМЯ (UTC): {current_datetime_utc.strftime('%Y-%m-%d %H:%M')}\n"
+        f"ТЕКУЩАЯ ДАТА И ВРЕМЯ (МСК): {current_datetime_utc.strftime('%Y-%m-%d %H:%M')}\n"
         f"СЕГОДНЯ: {current_weekday}, {current_date_str}\n\n"
+        f"СЕЙЧАС: {current_time_str} (МСК)\n"
         f"⚠️ ВАЖНО: Ты ОЧЕНЬ ПЛОХО считаешь даты в уме. НИКОГДА НЕ ВЫЧИСЛЯЙ ДАТЫ САМОСТОЯТЕЛЬНО!\n"
         f"Используй ТОЛЬКО эту таблицу (таблица начинается с СЕГОДНЯ и идет на 14 дней вперед):\n\n"
         f"{calendar_string}\n\n"
@@ -735,7 +738,7 @@ def _assemble_dynamic_prompt(prompt_library: dict, dialogue_state: str, user_mes
         'awaiting_city': ['#QUALIFICATION_RULES#'],
         'awaiting_readiness': ['#QUALIFICATION_RULES#'],
         'awaiting_citizenship': ['#QUALIFICATION_RULES#'],
-        'clarifying_citizenship': ['#QUALIFICATION_RULES#'],
+        'clarifying_citizenship': ['#QUALIFICATION_RULES#','#CLARI#'],
         'awaiting_age': ['#QUALIFICATION_RULES#'],
         'clarifying_anything': ['#QUALIFICATION_RULES#'],
         'clarifying_declined_vacancy': ['#QUALIFICATION_RULES#'],
