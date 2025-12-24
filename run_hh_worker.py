@@ -1722,17 +1722,17 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     should_timeout = True
 
                 # --- НОВЫЕ УРОВНИ ---
-                elif dialogue.reminder_level == 3 and time_since_update > datetime.timedelta(days=7):
-                    reminder_messages = ["Добрый день. Если вы еще находитесь в поиске работы, то будем рады пригласить вас пройти собеседование. Готовы продолжить диалог?"]
-                    next_level = 4
+                # elif dialogue.reminder_level == 3 and time_since_update > datetime.timedelta(days=7):
+                #     reminder_messages = ["Добрый день. Если вы еще находитесь в поиске работы, то будем рады пригласить вас пройти собеседование. Готовы продолжить диалог?"]
+                #     next_level = 4
 
-                elif dialogue.reminder_level == 4 and time_since_update > datetime.timedelta(days=21):
-                    reminder_messages = ["Добрый день. Вы трудоустроились? Если еще рассматриваете варианты, будем рады предложить вам пройти собеседование. А так же ответить на все вопросы, которые у вас есть. "]
-                    next_level = 5
+                # elif dialogue.reminder_level == 4 and time_since_update > datetime.timedelta(days=21):
+                #     reminder_messages = ["Добрый день. Вы трудоустроились? Если еще рассматриваете варианты, будем рады предложить вам пройти собеседование. А так же ответить на все вопросы, которые у вас есть. "]
+                #     next_level = 5
 
-                elif dialogue.reminder_level == 5 and time_since_update > datetime.timedelta(days=51):
-                    reminder_messages = ["Еще раз добрый день. Как ваши дела? Хотели бы сообщить вам, что вакансия вновь актуальна и если вы в поиске или задумываетесь о смене работы, мы с удовольствием пригласили бы вас на собеседование"]
-                    next_level = 6
+                # elif dialogue.reminder_level == 5 and time_since_update > datetime.timedelta(days=51):
+                #     reminder_messages = ["Еще раз добрый день. Как ваши дела? Хотели бы сообщить вам, что вакансия вновь актуальна и если вы в поиске или задумываетесь о смене работы, мы с удовольствием пригласили бы вас на собеседование"]
+                #     next_level = 6
 
                 # Выполнение действия
                 if should_timeout:
