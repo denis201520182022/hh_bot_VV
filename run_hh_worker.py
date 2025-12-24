@@ -1657,8 +1657,8 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     return
 
                 # Проверка: если диалог уже не in_progress (мог измениться параллельно), выходим
-                EXCLUDED_REMINDER_STATUSES = ['declined_interview', 'declined_vacancy' 'call_later']
-                if (dialogue.status not in ['in_progress', 'timed_out'] or
+                EXCLUDED_REMINDER_STATUSES = ['declined_interview', 'declined_vacancy' 'call_later', 'refusal']
+                if (dialogue.status not in ['in_progress'] or
                     dialogue.dialogue_state in EXCLUDED_REMINDER_STATUSES or
                     dialogue.reminder_level >= 6): # Теперь до 6 уровня включительно
                     return
@@ -1849,7 +1849,7 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
 
         # 2. Быстрая выборка ТОЛЬКО ID кандидатов, которым (возможно) нужны напоминания
         # Мы не грузим здесь объекты целиком, только ID
-        EXCLUDED_REMINDER_STATUSES = ['declined_vacancy', 'declined_interview', 'call_later']
+        EXCLUDED_REMINDER_STATUSES = ['declined_vacancy', 'declined_interview', 'call_later', 'refusal']
 
         result = await db.execute(
             select(Dialogue.id)
@@ -1857,7 +1857,7 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
                 Dialogue.recruiter_id == recruiter_id,
                 # ИЗМЕНЕНИЕ: Разрешаем обработку и для тех, кто уже в статусе timed_out,
                 # но еще не достиг финального уровня напоминаний
-                Dialogue.status.in_(['in_progress', 'timed_out']), 
+                Dialogue.status.in_(['in_progress']), 
 
                 Dialogue.dialogue_state.notin_(EXCLUDED_REMINDER_STATUSES),
                 Dialogue.reminder_level < 6 # 6 — это будет последнее напоминание (21 день)
