@@ -42,40 +42,43 @@ router = Router()
 class ExportStates(StatesGroup):
     waiting_for_range = State()
 
-
 def _build_7day_stats_content(db_session: Session) -> Text:
-    content_parts = [Bold("📊 Статистика за последние 7 дней:"), "\n", Italic("(по дате создания диалога)"), "\n\n"]
+    content_parts = [Bold("📊 Статистика за последние 7 дней:"), "\n", Italic("(взаимоисключающие категории)"), "\n\n"]
     
-    # Генерируем список последних 7 дней (от сегодня назад)
     days = [date.today() - timedelta(days=i) for i in range(7)]
     has_any_data = False
 
     for day in days:
-        # 1. ОТКЛИКИ (Всего диалогов, созданных в этот день)
+        # 1. ОТКЛИКИ (Всего)
         res = db_session.query(func.count(Dialogue.id)).filter(
             cast(Dialogue.created_at, Date) == day
         ).scalar() or 0
 
-        # 2. ПОДОШЛО (Диалоги за этот день со статусом qualified)
+        # 2. ПОДОШЛО (Только qualified)
         qual = db_session.query(func.count(Dialogue.id)).filter(
             cast(Dialogue.created_at, Date) == day,
             Dialogue.status == 'qualified'
         ).scalar() or 0
 
-        # 3. ОТКАЗОВ (Диалоги за этот день со статусом rejected)
+        # 3. ОТКАЗОВ (Только rejected)
         rej = db_session.query(func.count(Dialogue.id)).filter(
             cast(Dialogue.created_at, Date) == day,
             Dialogue.status == 'rejected'
         ).scalar() or 0
 
-        # 4. МОЛЧУНЫ (Диалоги за этот день, которые попали в таблицу молчунов)
+        # 4. МОЛЧУНЫ (Есть в таблице молчунов И статус НЕ qualified И НЕ rejected)
         sil = db_session.query(func.count(Dialogue.id)).join(
             InactiveNotificationQueue, Dialogue.id == InactiveNotificationQueue.dialogue_id
         ).filter(
-            cast(Dialogue.created_at, Date) == day
+            cast(Dialogue.created_at, Date) == day,
+            Dialogue.status.notin_(['qualified', 'rejected']) # <--- ИСКЛЮЧАЕМ ТЕХ, КТО ЗАВЕРШЕН
         ).scalar() or 0
 
-        if res > 0: # Выводим день, только если были отклики
+        # 5. В ПРОЦЕССЕ (Остальные: новые или в работе, кто еще не молчит 2 часа)
+        # Это поможет вам увидеть, сколько реально людей еще "живы" в боте
+        in_progress = res - (qual + rej + sil)
+
+        if res > 0:
             has_any_data = True
             day_str = day.strftime('%d.%m (%a)')
             content_parts.extend([
@@ -84,6 +87,7 @@ def _build_7day_stats_content(db_session: Session) -> Text:
                 "   - Подошло: ", Bold(str(qual)), "\n",
                 "   - Отказов: ", Bold(str(rej)), "\n",
                 "   - Молчунов: ", Bold(str(sil)), "\n",
+                "   - В работе: ", Bold(str(in_progress)), "\n",
                 "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             ])
 
@@ -91,7 +95,6 @@ def _build_7day_stats_content(db_session: Session) -> Text:
         return Text("📊 Данных за последние 7 дней не найдено.")
 
     return Text(*content_parts)
-
 @router.message(CommandStart())
 async def handle_start(message: Message, db_session: Session):
     user = db_session.query(TelegramUser).filter(TelegramUser.telegram_id == str(message.from_user.id)).first()
@@ -210,8 +213,9 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
         if d.dialogue_state == 'qualification_failed':
             m["отказали_мы_счетчик"] += 1
             
-        # Е) Молчуны (наличие записи в таблице молчунов)
-        if d.inactive_alerts: # Связь uselist=False в моделях
+        # Е) Молчуны (есть в табл. молчунов + НЕ завершен + НАЧАЛ диалог)
+        # Мы используем флаг user_started, который вы определили чуть выше в этом же цикле
+        if d.inactive_alerts and d.status not in ['qualified', 'rejected'] and user_started:
             m["молчуны_в_очереди_счетчик"] += 1
 
     # 2. ФОРМИРОВАНИЕ СТРОК ДЛЯ EXCEL С ВЫЧИСЛЕНИЯМИ
@@ -227,8 +231,8 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
         отказали_мы = m["отказали_мы_счетчик"]
         отказы_всего = отказался_кд + отказали_мы
         
-        # Молчуны = (Все кто в таблице молчунов) - (Те, кто даже не вступил в диалог)
-        молчуны = max(0, m["молчуны_в_очереди_счетчик"] - не_вступили)
+        # Теперь это "чистые" молчуны (кто начал общение, но не закончил и замолчал)
+        молчуны = m["молчуны_в_очереди_счетчик"]
 
         rows.append({
             "Дата": dt, 
