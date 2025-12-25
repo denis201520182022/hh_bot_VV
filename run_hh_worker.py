@@ -320,7 +320,9 @@ async def process_new_responses(recruiter_id: int, vacancy_ids: list):
                         continue
 
                     # Проверка лимитов
-                    settings_result = await db.execute(select(AppSettings).filter_by(id=1))
+                    settings_result = await db.execute(
+                        select(AppSettings).filter_by(id=1).with_for_update()
+                    )
                     settings = settings_result.scalar_one_or_none()
 
                     if not settings:
@@ -1762,7 +1764,10 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                     # 2. Проверяем баланс только если это ПЕРВОЕ долгое напоминание
                     if should_charge:
-                        settings_res = await db.execute(select(AppSettings).filter_by(id=1))
+                        # Добавляем .with_for_update()
+                        settings_res = await db.execute(
+                            select(AppSettings).filter_by(id=1).with_for_update()
+                        )
                         settings = settings_res.scalar_one_or_none()
                         
                         if not settings or settings.balance < settings.cost_per_long_reminder:
