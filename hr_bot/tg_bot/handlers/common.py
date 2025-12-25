@@ -21,6 +21,11 @@ from hr_bot.tg_bot.keyboards import (
     cancel_fsm_keyboard, create_stats_export_keyboard
 )
 
+from sqlalchemy import cast, Date, func
+from datetime import date, timedelta
+# Предполагается, что Bold, Italic, Text импортированы из aiogram.utils.formatting или аналогичной библиотеки
+from aiogram.utils.formatting import Bold, Italic, Text
+
 logger = logging.getLogger(__name__)
 router = Router()
 
@@ -29,53 +34,51 @@ class ExportStates(StatesGroup):
 
 
 def _build_7day_stats_content(db_session: Session) -> Text:
-    content_parts = [Bold("📊 Статистика за последние 7 дней:"), "\n", Italic("(по дате отклика)"), "\n\n"]
+    content_parts = [Bold("📊 Статистика за последние 7 дней:"), "\n", Italic("(по дате создания диалога)"), "\n\n"]
     
-    # Генерируем список последних 7 дней
+    # Генерируем список последних 7 дней (от сегодня назад)
     days = [date.today() - timedelta(days=i) for i in range(7)]
     has_any_data = False
 
     for day in days:
-        # 1. ВСЕГО ОТКЛИКОВ (берем из Dialogue, чтобы база была единой с остальными цифрами)
+        # 1. ОТКЛИКИ (Всего диалогов, созданных в этот день)
         res = db_session.query(func.count(Dialogue.id)).filter(
-            cast(Dialogue.response_created_at, Date) == day
+            cast(Dialogue.created_at, Date) == day
         ).scalar() or 0
 
-        # 2. МОЛЧУНЫ (считаем записи в InactiveQueue, привязанные к диалогам за этот день)
-        sil = db_session.query(func.count(InactiveNotificationQueue.id)).join(
-            Dialogue, InactiveNotificationQueue.dialogue_id == Dialogue.id
+        # 2. ПОДОШЛО (Диалоги за этот день со статусом qualified)
+        qual = db_session.query(func.count(Dialogue.id)).filter(
+            cast(Dialogue.created_at, Date) == day,
+            Dialogue.status == 'qualified'
+        ).scalar() or 0
+
+        # 3. ОТКАЗОВ (Диалоги за этот день со статусом rejected)
+        rej = db_session.query(func.count(Dialogue.id)).filter(
+            cast(Dialogue.created_at, Date) == day,
+            Dialogue.status == 'rejected'
+        ).scalar() or 0
+
+        # 4. МОЛЧУНЫ (Диалоги за этот день, которые попали в таблицу молчунов)
+        sil = db_session.query(func.count(Dialogue.id)).join(
+            InactiveNotificationQueue, Dialogue.id == InactiveNotificationQueue.dialogue_id
         ).filter(
-            cast(Dialogue.response_created_at, Date) == day
+            cast(Dialogue.created_at, Date) == day
         ).scalar() or 0
 
-        # 3. ОТКАЗНИКИ (считаем записи в RejectedQueue, привязанные к диалогам за этот день)
-        rej = db_session.query(func.count(RejectedNotificationQueue.id)).join(
-            Dialogue, RejectedNotificationQueue.dialogue_id == Dialogue.id
-        ).filter(
-            cast(Dialogue.response_created_at, Date) == day
-        ).scalar() or 0
-
-        # 4. ПОДОШЕДШИЕ / СОБЕСЫ (считаем записи в NotificationQueue через Candidate)
-        qual = db_session.query(func.count(NotificationQueue.id)).join(
-            Dialogue, NotificationQueue.candidate_id == Dialogue.candidate_id
-        ).filter(
-            cast(Dialogue.response_created_at, Date) == day
-        ).scalar() or 0
-
-        if any([res, sil, rej, qual]):
+        if res > 0: # Выводим день, только если были отклики
             has_any_data = True
             day_str = day.strftime('%d.%m (%a)')
             content_parts.extend([
                 Bold(f"📅 {day_str}"), "\n",
-                "   Откликов: ", Bold(res), "\n",
-                "   - Подошло: ", Bold(qual), "\n",
-                "   - Отказов: ", Bold(rej), "\n",
-                "   - Молчунов: ", Bold(sil), "\n",
+                "   Откликов: ", Bold(str(res)), "\n",
+                "   - Подошло: ", Bold(str(qual)), "\n",
+                "   - Отказов: ", Bold(str(rej)), "\n",
+                "   - Молчунов: ", Bold(str(sil)), "\n",
                 "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             ])
 
     if not has_any_data:
-        return Text("📊 Данных за 7 дней пока нет.")
+        return Text("📊 Данных за последние 7 дней не найдено.")
 
     return Text(*content_parts)
 
