@@ -314,7 +314,7 @@ async def generate_and_send_excel(message: Message, start_date: date, end_date: 
 
     output.seek(0)
     await message.answer_document(
-        BufferedInputFile(output.read(), filename=f"Detail_Report_{date.today()}.xlsx"),
+        BufferedInputFile(output.read(), filename=f"Detail_Report_{start_date} - {end_date}.xlsx"),
         caption=f"📊 Расширенный отчет ({start_date} - {end_date})"
     )
     await msg_wait.delete()

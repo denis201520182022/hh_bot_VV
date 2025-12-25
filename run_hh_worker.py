@@ -384,8 +384,10 @@ async def process_new_responses(recruiter_id: int, vacancy_ids: list):
                     # Сначала перемещаем, чтобы зафиксировать намерение
                     await hh_api.move_response_to_folder(recruiter, db, response_id, 'consider')
 
-                    # СПИСАНИЕ СРЕДСТВ
-                    settings.balance -= settings.cost_per_dialogue
+                    # СПИСАНИЕ СРЕДСТВ + СТАТИСТИКА
+                    cost = settings.cost_per_dialogue
+                    settings.balance -= cost
+                    settings.total_spent_on_dialogues += cost # Увеличиваем счетчик диалогов
 
                     # Пытаемся получить сообщения, но ошибка здесь НЕ ДОЛЖНА отменять создание диалога
                     try:
@@ -1261,6 +1263,21 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
         # Если подходит и город СПб, то перевод в состояние 'init_scheduling_spb' и запрос к llm с добавкой "Начни запись кандидата на собеседование в Санкт-Петербурге."
 
         # Обработка квалификации
+
+        # --- НОВЫЙ БЛОК: Обработка состояния call_later ---
+        if new_state == 'call_later':
+            # Благодаря selectinload(Dialogue.inactive_alerts) в начале функции,
+            # мы можем проверить наличие записи через атрибут
+            if not dialogue.inactive_alerts:
+                db.add(InactiveNotificationQueue(
+                    dialogue_id=dialogue.id, 
+                    status='pending'
+                ))
+                logger.info(f"[{dialogue.hh_response_id}] Переход в state 'call_later'. Добавлена запись в InactiveNotificationQueue.")
+            else:
+                logger.debug(f"[{dialogue.hh_response_id}] State 'call_later', но диалог уже есть в таблице молчунов. Пропускаем.")
+        # --------------------------------------------------
+
         if new_state in ['forwarded_to_researcher', 'interview_scheduled_spb'] and dialogue.status != 'qualified':
             dialogue.status = 'qualified'
 
@@ -1803,10 +1820,12 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                             dialogue.history = current_history[-150:]
 
                             # 3. СПИСЫВАЕМ ДЕНЬГИ (только если это уровень 4)
+                            # 3. СПИСЫВАЕМ ДЕНЬГИ + СТАТИСТИКА
                             if should_charge and settings:
-                                settings.balance -= settings.cost_per_long_reminder
-                                logger.info(f"ЕДИНОВРЕМЕННОЕ СПИСАНИЕ: {settings.cost_per_long_reminder} руб. за активацию долгих напоминаний.")
-
+                                cost = settings.cost_per_long_reminder
+                                settings.balance -= cost
+                                settings.total_spent_on_reminders += cost # Увеличиваем счетчик напоминалок
+                                logger.info(f"ЕДИНОВРЕМЕННОЕ СПИСАНИЕ: {cost} руб. Всего на дожимы потрачено: {settings.total_spent_on_reminders}")
                         elif status_code == 403:
                              # Вакансия закрыта или доступ запрещен
                              dialogue.reminder_level = 6
