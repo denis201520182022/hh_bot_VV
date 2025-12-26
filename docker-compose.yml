@@ -13,7 +13,7 @@ services:
       - DEFAULT_POOL_SIZE=80
       - MIN_POOL_SIZE=20
       - RESERVE_POOL_SIZE=10
-      - AUTH_TYPE=any # Для упрощения, т.к. БД внешняя
+      - AUTH_TYPE=plain # Для упрощения, т.к. БД внешняя
       - LISTEN_PORT=6432 # <--- ВОТ ЭТА СТРОКА РЕШАЕТ ПРОБЛЕМУ
     ports:
       - "6432:6432"
