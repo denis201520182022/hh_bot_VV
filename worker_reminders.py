@@ -114,7 +114,7 @@ async def check_and_send_interview_reminders():
         async with SessionLocal() as db_session:
             try:
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
-
+                logger.debug("Проверка очереди напоминаний о собеседованиях")
                 # Выбираем напоминания, которые пора отправить
                 # Используем selectinload для всех необходимых связей
                 result = await db_session.execute(
@@ -140,28 +140,30 @@ async def check_and_send_interview_reminders():
                     await asyncio.sleep(30) # Пауза, если нет задач
                     continue
 
-                logger.info(f"[Interview Reminders] Найдено {len(reminders_to_send)} напоминаний для отправки.")
-
+                logger.info("Найдена пачка напоминаний о собеседованиях", extra={
+                    "count": len(reminders_to_send)
+                })
                 for reminder in reminders_to_send:
                     try:
                         dialogue = reminder.dialogue
                         recruiter = reminder.recruiter # Объект рекрутера уже загружен
                         vacancy = dialogue.vacancy
                         candidate = dialogue.candidate
-
+                        log = logging.LoggerAdapter(logger, {
+                            "dialogue_id": dialogue.id,
+                            "hh_response_id": dialogue.hh_response_id,
+                            "recruiter_id": recruiter.id,
+                            "notification_type": reminder.notification_type
+                        })
                         if not dialogue or not recruiter or not vacancy or not candidate:
-                            logger.error(
-                                f"Не удалось загрузить связанные объекты для напоминания {reminder.id}. "
-                                f"Dialogue: {bool(dialogue)}, Recruiter: {bool(recruiter)}, "
-                                f"Vacancy: {bool(vacancy)}, Candidate: {bool(candidate)}"
-                            )
+                            log.error("Ошибка загрузки данных для напоминания о собеседовании")
                             reminder.status = 'error'
                             reminder.processed_at = now_utc
                             await db_session.commit()
                             continue
 
                         if not recruiter.access_token:
-                            logger.error(f"У рекрутера {recruiter.name} (ID: {recruiter.id}) нет access_token. Не могу отправить напоминание {reminder.id}.")
+                            log.error("Напоминание не отправлено: отсутствует access_token рекрутера")
                             reminder.status = 'error'
                             reminder.processed_at = now_utc
                             await db_session.commit()
@@ -175,7 +177,7 @@ async def check_and_send_interview_reminders():
                         # Получаем шаблон сообщения
                         template = MESSAGE_TEMPLATES.get(reminder.notification_type)
                         if not template:
-                            logger.error(f"Не найден шаблон сообщения для типа уведомления '{reminder.notification_type}'. Напоминание {reminder.id} не будет отправлено.")
+                            log.error(f"Не найден шаблон сообщения для типа уведомления '{reminder.notification_type}'. Напоминание {reminder.id} не будет отправлено.")
                             reminder.status = 'error'
                             reminder.processed_at = now_utc
                             await db_session.commit()
@@ -188,8 +190,7 @@ async def check_and_send_interview_reminders():
                             interview_time_spb=interview_time_spb
                         )
 
-                        logger.info(f"Отправка напоминания типа '{reminder.notification_type}' для диалога {dialogue.hh_response_id} от рекрутера {recruiter.name}...")
-
+                        log.debug("Попытка отправки сообщения-напоминания в HH")
                         # Отправка сообщения кандидату через HH API
                         # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
                         send_result = await hh_api.send_message(
@@ -202,27 +203,23 @@ async def check_and_send_interview_reminders():
                         if send_result == 200:
                             # УСПЕХ
                             reminder.status = 'sent'
-                            logger.info(f"Напоминание {reminder.id} успешно отправлено кандидату {candidate.full_name}.")
+                            log.info("Напоминание о собеседовании успешно отправлено кандидату")
 
                         elif send_result == 403:
                             # ВАКАНСИЯ ЗАКРЫТА
                             reminder.status = 'cancelled' # Отменяем, так как отправлять бессмысленно
-                            logger.warning(
-                                f"Напоминание {reminder.id} ОТМЕНЕНО: Вакансия закрыта/в архиве. "
-                                f"Кандидат: {candidate.full_name}, Диалог: {dialogue.hh_response_id}"
-                            )
+                            log.warning("Напоминание отменено: вакансия в архиве или закрыта")
 
                         else:
                             # ПРОЧИЕ ОШИБКИ (False или другие коды)
                             reminder.status = 'error'
-                            logger.error(f"Не удалось отправить напоминание {reminder.id} кандидату {candidate.full_name} (API Error).")
-                        # -----------------------
+                            log.error("Сбой API при отправке напоминания о собеседовании")
 
                         reminder.processed_at = now_utc
                         await db_session.commit() # Коммитим каждое напоминание отдельно для надежности
 
                     except Exception as e:
-                        logger.error(f"Ошибка при обработке напоминания {reminder.id}: {e}", exc_info=True)
+                        log.error(f"Ошибка при обработке напоминания {reminder.id}: {e}", exc_info=True)
                         if reminder.id: # Убедимся, что reminder объект существует
                             reminder.status = 'error'
                             reminder.processed_at = now_utc
@@ -230,7 +227,7 @@ async def check_and_send_interview_reminders():
                         else:
                             await db_session.rollback() # Откатываем, если ошибка до создания reminder
             except Exception as e:
-                logger.critical(f"Критическая ошибка в фоновом обработчике напоминаний о собеседованиях: {e}", exc_info=True)
+                log.critical(f"Критическая ошибка в фоновом обработчике напоминаний о собеседованиях: {e}", exc_info=True)
                 await db_session.rollback() # Откат при ошибке верхнего уровня
 
         await asyncio.sleep(30) # Пауза между циклами проверки
@@ -257,7 +254,12 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     ]
                 )
                 recruiter = await db.get(TrackedRecruiter, recruiter_id)
-
+                log = logging.LoggerAdapter(logger, {
+                    "dialogue_id": dialogue.id,
+                    "hh_response_id": dialogue.hh_response_id,
+                    "recruiter_id": recruiter_id,
+                    "current_level": dialogue.reminder_level
+                })
                 if not dialogue or not recruiter:
                     return
 
@@ -282,7 +284,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     return
                 elif current_folder_on_hh == 404:
                     # Вакансия закрыта
-                    logger.info(f"Вакансия для диалога {dialogue_hh_id} закрыта. Обновляю статус.")
+                    log.info("Дожимы остановлены: вакансия закрыта (404)")
                     dialogue.status = 'timed_out'
                     dialogue.reminder_level = 6
                     await db.commit()
@@ -290,7 +292,9 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
 
                 elif current_folder_on_hh != 'consider':
                     # Кандидат перемещен вручную рекрутером
-                    logger.info(f"Диалог {dialogue_hh_id} перемещен в '{current_folder_on_hh}'. Отключаю напоминания.")
+                    log.info("Дожимы остановлены: кандидат перемещен рекрутером вручную", extra={
+                        "new_folder": current_folder_on_hh
+                    })
                     dialogue.status = 'recruiter_handled'
                     dialogue.reminder_level = 3
 
@@ -344,9 +348,9 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     # ТВОЕ ТРЕБОВАНИЕ: Если запись уже есть, ничего не делаем с таблицей молчунов
                     if not dialogue.inactive_alerts:
                         db.add(InactiveNotificationQueue(dialogue_id=dialogue.id, status='pending'))
-                        logger.info(f"Диалог {dialogue_hh_id} впервые добавлен в InactiveNotificationQueue.")
+                        log.info(f"Диалог впервые добавлен в InactiveNotificationQueue.")
                     else:
-                        logger.debug(f"Диалог {dialogue_hh_id} уже зафиксирован в таблице молчунов. Повторная запись не требуется.")
+                        log.debug(f"Диалог уже зафиксирован в таблице молчунов. Повторная запись не требуется.")
 
                     # Но статус самого диалога и уровень напоминания обновляем в любом случае,
                     # чтобы пошел отсчет 7 дней для уровня 4.
@@ -356,7 +360,10 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                     await db.commit()
 
                 elif reminder_messages:
-                    logger.info(f"Отправка напоминания уровня {next_level} для диалога {dialogue_hh_id}.")
+                    log.info("Отправлено автоматическое напоминание (дожим)", extra={
+                        "next_level": next_level,
+                        "time_since_last_msg": str(time_since_update)
+                    })
 
                     # 1. Определяем типы напоминаний
                     is_long_reminder = next_level in [4, 5, 6]
@@ -374,7 +381,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                         settings = settings_res.scalar_one_or_none()
                         
                         if not settings or settings.balance < settings.cost_per_long_reminder:
-                            logger.warning(f"Баланс пуст. Первое долгое напоминание для {dialogue_hh_id} отменено.")
+                            log.warning(f"Баланс пуст. Первое долгое напоминание для {dialogue_hh_id} отменено.")
                             return 
 
                     all_sent = True
@@ -411,7 +418,10 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                                 cost = settings.cost_per_long_reminder
                                 settings.balance -= cost
                                 settings.total_spent_on_reminders += cost # Увеличиваем счетчик напоминалок
-                                logger.info(f"ЕДИНОВРЕМЕННОЕ СПИСАНИЕ: {cost} руб. Всего на дожимы потрачено: {settings.total_spent_on_reminders}")
+                                log.info("Списана плата за длинную цепочку напоминаний", extra={
+                                    "amount": float(cost),
+                                    "total_spent_reminders": float(settings.total_spent_on_reminders)
+                                })
                         elif status_code == 403:
                              # Вакансия закрыта или доступ запрещен
                              dialogue.reminder_level = 6
@@ -429,7 +439,7 @@ async def _process_single_reminder_task(dialogue_id: int, recruiter_id: int, sem
                         await db.commit()
 
             except Exception as e:
-                logger.error(f"Ошибка в задаче напоминания для диалога {dialogue_id}: {e}")
+                log.error(f"Ошибка в задаче напоминания для диалога {dialogue_id}: {e}")
                 # Не рейзим ошибку, чтобы не поломать gather
 
 
@@ -440,6 +450,7 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
     далее каждый таск создает свою сессию.
     """
     function_start_time = time.monotonic()
+    log = logging.LoggerAdapter(logger, {"recruiter_id": recruiter_id})
 
     # Семафор для ограничения одновременных проверок напоминаний (чтобы не убить базу)
     # Можно использовать тот же MAX_CONCURRENT_DIALOGUES или создать свой
@@ -476,7 +487,9 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
         if not candidate_ids_to_check:
             return
 
-        logger.debug(f"Запуск параллельной проверки напоминаний для {len(candidate_ids_to_check)} диалогов...")
+        log.debug("Запуск параллельной проверки напоминаний для кандидатов", extra={
+            "candidates_count": len(candidate_ids_to_check)
+        })
 
         # 3. Создаем задачи для параллельного выполнения
         tasks = [
@@ -488,18 +501,17 @@ async def process_reminders(recruiter_id: int, db: AsyncSession):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     except Exception as e:
-        logger.error(f"Ошибка в process_reminders (диспетчер): {e}", exc_info=True)
+        log.error("Сбой в диспетчере проверки напоминаний", exc_info=True)
     finally:
-        logger.debug(
-            f"[Recruiter ID {recruiter_id}] "
-            f"process_reminders finished in {time.monotonic() - function_start_time:.2f}s"
-        )
+        log.debug("Проверка напоминаний для рекрутера завершена", extra={
+            "duration_sec": round(time.monotonic() - function_start_time, 2)
+        })
 
 
 
 
 async def run_reminders_cycle():
-    logger.info("Воркер напоминаний запущен...")
+    logger.info("Глобальный цикл воркера напоминаний запущен")
     
     while not shutdown_requested:
         try:
@@ -515,7 +527,7 @@ async def run_reminders_cycle():
                     await db_session.commit()
 
         except Exception as e:
-            logger.error(f"Ошибка в цикле дожимов: {e}")
+            logger.error("Критическая ошибка в главном цикле дожимов", exc_info=True)
         
         await asyncio.sleep(60) # Проверяем дожимы раз в минуту
 

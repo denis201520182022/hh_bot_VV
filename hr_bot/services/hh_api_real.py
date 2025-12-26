@@ -73,7 +73,10 @@ async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str
             # Если мы дошли сюда, значит токен в БД все еще просрочен, и мы — ПЕРВЫЙ процесс, 
             # который получил право на обновление.
             
-            logger.info(f"Токен для рекрутера {db_recruiter.name} истек или отсутствует. Обновляю...")
+            logger.info("Обновление access_token рекрутера", extra={
+                "recruiter_id": db_recruiter.id,
+                "recruiter_name": db_recruiter.name
+            })
             epp = f"Токен для рекрутера {db_recruiter.name} истек или отсутствует. Обновляю..."
             await send_system_alert(epp, alert_type="admin_only")
 
@@ -194,6 +197,7 @@ async def _make_request(
     # Параметр add_user_agent полностью удален
     **kwargs,
 ):
+    
     """Асинхронный универсальный запрос с ограничением по конкурентности."""
     token = await get_access_token(recruiter, db)
     if not token:

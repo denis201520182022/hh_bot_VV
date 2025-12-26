@@ -27,10 +27,10 @@ SYNC_DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{D
 
 engine = create_async_engine( # 
     DATABASE_URL,
-    pool_size=115,
+    pool_size=50,
     max_overflow=20,
     pool_timeout=60,
-    pool_recycle=3600,
+    pool_recycle=1800,
     pool_pre_ping=True
 )
 

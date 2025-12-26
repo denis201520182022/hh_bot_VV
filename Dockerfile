@@ -14,6 +14,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
+    tzdata \ 
     && rm -rf /var/lib/apt/lists/*
 
 # Копируем файл зависимостей

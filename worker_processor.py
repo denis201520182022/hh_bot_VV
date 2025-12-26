@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 try:
     SPB_TIMEZONE = ZoneInfo("Europe/Moscow")
 except ZoneInfoNotFoundError:
-    logger.critical("Часовой пояс 'Europe/Moscow' не найден. Использую UTC.")
+    logger.critical("Системная ошибка: часовой пояс 'Europe/Moscow' не найден", extra={"fallback": "UTC"})
     SPB_TIMEZONE = datetime.timezone.utc
     
 #CUTOFF_DATE_FOR_RESPONSES = datetime.datetime(2025, 11, 13, 11, 0, 0, tzinfo=datetime.timezone.utc)
@@ -102,6 +102,11 @@ async def _record_citizenship_usage(db: AsyncSession, dialogue: Dialogue, llm_da
             cost=total_call_cost
         )
         db.add(usage_log)
+        logger.debug("Расход токенов на анализ гражданства зафиксирован", extra={
+            "hh_response_id": dialogue.hh_response_id,
+            "cost": float(total_call_cost),
+            "tokens": total_tokens
+        })
 
         # Обновление счетчиков диалога
         dialogue.total_prompt_tokens += p_tokens
@@ -111,7 +116,10 @@ async def _record_citizenship_usage(db: AsyncSession, dialogue: Dialogue, llm_da
         
         await db.flush()
     except Exception as e:
-        logger.error(f"Ошибка логирования токенов гражданства: {e}")
+        logger.error("Ошибка при сохранении статистики токенов гражданства", extra={
+            "hh_response_id": dialogue.hh_response_id,
+            "error": str(e)
+        })
 
 
 
@@ -142,7 +150,10 @@ def _log_missing_vacancy(title: str, city: str):
                 
     except Exception as e:
         # Логируем ошибку, но не ломаем работу бота
-        logger.error(f"Ошибка при записи в missing_vacancies.txt: {e}")
+        logger.error("Не удалось записать отсутствующую вакансию в файл", extra={
+            "vacancy_entry": entry,
+            "error": str(e)
+        })
 
 def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_city: str) -> str:
     """
@@ -165,7 +176,10 @@ def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_cit
             return 1.0 # Полное вхождение считаем идеальным
         return difflib.SequenceMatcher(None, str1, str2).ratio()
 
-    logger.debug(f"🔍 Поиск вакансии (Best Match): '{vacancy_title}' в '{vacancy_city}'")
+    logger.debug("Запуск поиска описания вакансии (Best Match)", extra={
+        "input_title": vacancy_title,
+        "input_city": vacancy_city
+    })
 
     norm_input_title = normalize_text(vacancy_title)
     norm_input_city = normalize_text(vacancy_city)
@@ -209,14 +223,22 @@ def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_cit
             # logger.debug(f"📈 Новый лидер: {vacancy.get('titles')[0]} (Score: {total_score:.2f})")
 
     if best_match_description:
-        logger.info(f"✅ Выбрано лучшее совпадение (Score: {best_match_score:.2f})")
+        logger.info("Найдено наиболее подходящее описание вакансии", extra={
+            "match_score": round(best_match_score, 2),
+            "vacancy_title": vacancy_title
+        })
         return best_match_description
 
     # Если ничего не нашли
-    logger.warning(f"🤡 Не найдено точное описание для '{vacancy_title}' в '{vacancy_city}'.")
+    logger.warning("Соответствующее описание вакансии не найдено в базе знаний", extra={
+        "vacancy_title": vacancy_title,
+        "vacancy_city": vacancy_city
+    })
     _log_missing_vacancy(vacancy_title, vacancy_city)
     
     return "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. Отвечай на вопросы кандидата на основе общей информации из FAQ."
+
+
 def _generate_calendar_context() -> str:
     """
     Генерирует текстовый блок с календарем и правилами работы с датами.
@@ -329,7 +351,14 @@ def _assemble_dynamic_prompt(prompt_library: dict, dialogue_state: str, user_mes
     )
     prompt_pieces.insert(1, vacancy_context)
     
-
+    # Логируем состав промпта в DEBUG
+    logger.debug("Сформирован динамический системный промпт", extra={
+        "dialogue_state": dialogue_state,
+        "included_library_blocks": final_block_keys,
+        "has_calendar": dialogue_state in SCHEDULING_STATES,
+        "has_post_qual": dialogue_state in POST_QUALIFICATION_STATES and bool(prompt_library.get('#POSTCVAL#')),
+        "vacancy_desc_length": len(vacancy_description)
+    })
     return "\n\n".join(prompt_pieces)
 
 
@@ -340,7 +369,11 @@ def _assemble_dynamic_prompt(prompt_library: dict, dialogue_state: str, user_mes
 async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_library: dict, db: AsyncSession):
     """Исправленная версия с правильной работой с ORM"""
     dialogue_processing_start_time = time.monotonic()
-
+    # Начальный логгер (пока не загрузили данные из БД)
+    log = logging.LoggerAdapter(logger, {
+        "dialogue_id": dialogue_id,
+        "recruiter_id": recruiter_id
+    })
     dialogue = None
     recruiter = None
     # --- ЗАГРУЗКА ЗДЕСЬ (значение по умолчанию) ---
@@ -350,7 +383,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
     try:
         # Проверка активности сессии
         if not db.is_active:
-            logger.error(f"Session is not active for dialogue {dialogue_id}")
+            log.error("Сессия базы данных не активна, обработка прервана")
             return
 
         db_fetch_start = time.monotonic()
@@ -369,12 +402,22 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
         # Загружаем recruiter
         recruiter = await db.get(TrackedRecruiter, recruiter_id)
-
-        logger.debug(f"[Dialogue {dialogue_id}] DB fetch took: {time.monotonic() - db_fetch_start:.4f} sec.")
-
         if not dialogue or not recruiter:
-            logger.error(f"Dialogue {dialogue_id} or recruiter {recruiter_id} not found")
+            log.error("Диалог или рекрутер не найдены в базе данных")
             return
+        # Теперь у нас есть hh_response_id и vacancy_id — добавляем их в контекст всех будущих логов
+        log = logging.LoggerAdapter(logger, {
+            "dialogue_id": dialogue_id,
+            "recruiter_id": recruiter_id,
+            "hh_response_id": dialogue.hh_response_id,
+            "vacancy_id": dialogue.vacancy.hh_vacancy_id
+        })
+
+        log.debug("Данные диалога успешно загружены из БД", extra={
+            "fetch_duration": round(time.monotonic() - db_fetch_start, 4)
+        })
+
+        
         # --- ЗАГРУЗКА ЗДЕСЬ ---
         log_dialogue_hh_response_id = dialogue.hh_response_id
         # --- КОНЕЦ ЗАГРУЗКИ ---
@@ -382,11 +425,11 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
         await db.refresh(dialogue.candidate)
         await db.refresh(dialogue.vacancy)
 
-        logger.debug(f"Processing dialogue {dialogue.hh_response_id}...")
+        log.info("Запуск обработки сообщений в диалоге")
 
         pending_messages = dialogue.pending_messages or []
         if not pending_messages:
-            logger.debug(f"Dialogue {dialogue.id}: no pending messages")
+            log.debug("В очереди pending_messages нет новых сообщений, пропуск")
             return
 
         # *************************************************************************************************************************************
@@ -394,6 +437,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
         # *************************************************************************************************************************************
         if dialogue.dialogue_state == "awaiting_citizenship" and pending_messages:
             all_pending_content = "\n".join([pm.get('content', '') if isinstance(pm, dict) else str(pm) for pm in pending_messages])
+            log.debug("Запуск анализа гражданства кандидата через LLM")
             citizenship_analysis_prompt = (
                 '''Проанализируй сообщения кандидата и верни ответ\n
                 [CRITICAL RULE] Твой ответ ВСЕГДА должен быть в формате JSON.
@@ -421,7 +465,8 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                     user_message=all_pending_content,
                     current_datetime_utc=datetime.datetime.now(datetime.timezone.utc),
                     attempt_tracker=citizenship_attempts, 
-                    skip_instructions=True
+                    skip_instructions=True,
+                    log_context=log
                 )
 
                 if llm_citizenship_response:
@@ -431,7 +476,9 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                     # 2. Логируем "пустышки" для всех предыдущих неудачных попыток (ретраев), если они были
                     total_attempts = len(citizenship_attempts)
                     if total_attempts > 1:
-                        logger.warning(f"[{dialogue.hh_response_id}] Анализ гражданства: выполнено успешно после {total_attempts-1} ретраев.")
+                        log.warning("Анализ гражданства выполнен успешно после ретраев", extra={
+                            "retry_attempts": total_attempts - 1
+                        })
                         for i in range(total_attempts - 1):
                             retry_log = LlmUsageLog(
                                 dialogue_id=dialogue.id,
@@ -447,7 +494,10 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                     try:
                         parsed_response = llm_citizenship_response.get('parsed_response')
                         if parsed_response and parsed_response.get("is") == "yes":
-                            logger.info(f"[{dialogue.hh_response_id}] Распарсили гражданство: {parsed_response.get('citizenship')}")
+                            log.info("Гражданство успешно определено", extra={
+                                "citizenship": citizenship,
+                                "new_state": dialogue.dialogue_state
+                            })
                             citizenship = parsed_response.get("citizenship")
                             system_command_content = None
 
@@ -473,15 +523,17 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                                 
                                 
                         else:
-                            logger.info(f"[{dialogue.hh_response_id}] Информация о гражданстве не найдена в текущем сообщении.")
+                            log.info("Информация о гражданстве не найдена в текущих сообщениях")
 
                     except Exception as parse_err:
-                        logger.error(f"[{dialogue.hh_response_id}] Ошибка разбора JSON гражданства: {parse_err}")
+                        log.error("Ошибка разбора JSON ответа по гражданству", extra={"error": str(parse_err)})
 
             except Exception as citizenship_err:
                 # --- ЛОГИРОВАНИЕ ПОЛНОГО ПРОВАЛА ---
                 # Если tenacity исчерпала попытки, записываем в БД все неудачные заходы
-                logger.error(f"[{dialogue.hh_response_id}] Анализ гражданства ПРОВАЛЕН после {len(citizenship_attempts)} попыток: {citizenship_err}")
+                log.error("Анализ гражданства полностью провален после всех попыток", extra={
+                    "attempts_made": len(citizenship_attempts)
+                }, exc_info=True)
                 for i in range(len(citizenship_attempts)):
                     failure_log = LlmUsageLog(
                         dialogue_id=dialogue.id,
@@ -545,7 +597,11 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
         llm_call_start = time.monotonic()
         llm_data = None
         attempt_tracker = [] # <--- Создаем "ловушку" для попыток
-
+        log.debug("Подготовка к отправке запроса в LLM", extra={
+            "current_state": dialogue.dialogue_state,
+            "history_depth": len(dialogue.history or []),
+            "pending_count": len(pending_messages)
+        })
         try:
             # Передаем attempt_tracker в функцию
             llm_data = await llm_handler.get_bot_response(
@@ -553,7 +609,8 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                 dialogue_history=dialogue.history or [],
                 user_message=combined_masked_message,
                 current_datetime_utc=datetime.datetime.now(datetime.timezone.utc),
-                attempt_tracker=attempt_tracker # <--- Передаем список
+                attempt_tracker=attempt_tracker,
+                log_context=log # <--- Передаем список
             )
             
             # --- УСПЕШНЫЙ СЦЕНАРИЙ ---
@@ -564,7 +621,9 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             failed_attempts = total_attempts - 1 # Все кроме последней (успешной)
             
             if failed_attempts > 0:
-                logger.warning(f"[{dialogue.hh_response_id}] Было {failed_attempts} скрытых ретраев tenacity.")
+                log.warning("Запрос к LLM выполнен успешно, но потребовались повторные попытки", extra={
+                    "failed_retries": failed_attempts
+                })
                 for i in range(failed_attempts):
                     # Записываем "пустышки" для ретраев
                     retry_log = LlmUsageLog(
@@ -585,7 +644,10 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             # В attempt_tracker лежат метки ВСЕХ попыток (например, 3 штуки).
             # Все они считаются провальными.
             
-            logger.error(f"[{dialogue.hh_response_id}] LLM Request FAILED completely after {len(attempt_tracker)} attempts: {llm_error}")
+            log.error("Запрос к LLM полностью провален после всех попыток", extra={
+                "attempts_count": len(attempt_tracker),
+                "error_type": type(llm_error).__name__
+            }, exc_info=True)
             
             try:
                 for i in range(len(attempt_tracker)):
@@ -602,13 +664,16 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                     db.add(failure_log)
                 await db.commit()
             except Exception as log_ex:
-                logger.error(f"Failed to log LLM errors to DB: {log_ex}")
+                log.error(f"Failed to log LLM errors to DB: {log_ex}")
 
             raise llm_error # Пробрасываем ошибку дальше
 
-        logger.debug(f"[{dialogue.hh_response_id}] LLM call: {time.monotonic() - llm_call_start:.2f} sec.")
+        log.debug("Ответ от LLM получен", extra={
+            "llm_duration_sec": round(time.monotonic() - llm_call_start, 2)
+        })
 
         if llm_data is None:
+            log.error("LLM сервис вернул пустой ответ (None)")
             alert_message = "⚠️ LLM service unavailable!"
             await send_system_alert(alert_message, alert_type="admin_only")
             return
@@ -656,7 +721,13 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                 dialogue.total_cached_tokens += cached_tokens
                 # Преобразуем float в Decimal перед сложением
                 dialogue.total_cost += Decimal(str(total_call_cost))
-                
+                log.info("Запрос к нейросети завершен успешно", extra={
+                    "cost_usd": float(total_call_cost),
+                    "tokens_prompt": p_tokens,
+                    "tokens_completion": c_tokens,
+                    "tokens_cached": cached_tokens,
+                    "new_state": new_state
+                })
                 await db.commit() 
                 
                 # После коммита объекты могут "отцепиться" (expire), поэтому рефрешим dialogue
@@ -665,7 +736,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                 # (Если usage_log дальше не нужен, его можно не рефрешить)
 
             except Exception as e:
-                logger.error(f"Error logging tokens for dialogue {dialogue.id}: {e}")
+                log.error("Ошибка при сохранении статистики токенов в БД", extra={"error": str(e)})
         # ===========================
 
         bot_response_text = llm_response.get("response_text")
@@ -696,13 +767,16 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
     #and dialogue.dialogue_state not in ['scheduling_spb_day', 'scheduling_spb_time', 'interview_scheduled_spb', 'init_scheduling_spb']  # <-- ДОБАВИТЬ
     #and new_state not in ['scheduling_spb_day', 'scheduling_spb_time', 'interview_scheduled_spb', 'init_scheduling_spb']
         and is_candidate_profile_complete(dialogue.candidate)):
-            logger.info(f"[{dialogue.hh_response_id}] Анкета собрана полностью. Запускаю проверку критериев.")
+            log.info("Анкета собрана полностью, запуск программной проверки критериев")
 
             is_eligible = check_candidate_eligibility(dialogue.candidate)
 
             if not is_eligible:
                 # --- СЦЕНАРИЙ 1: ОТКАЗ ---
-                logger.info(f"[{dialogue.hh_response_id}] Кандидат НЕ прошел проверку кодом (Age/Citizenship).")
+                log.info("Кандидат отклонен по критериям (возраст/гражданство)", extra={
+                    "age": dialogue.candidate.age,
+                    "citizenship": dialogue.candidate.citizenship
+                })
 
                 # Принудительно меняем состояние и текст (игнорируем то, что написала LLM)
                 new_state = 'qualification_failed'
@@ -713,7 +787,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
             else:
                 # --- СЦЕНАРИЙ 2: ПОДХОДИТ ---
-                logger.info(f"[{dialogue.hh_response_id}] Кандидат успешно прошел проверку кодом.")
+                log.info("Кандидат успешно прошел проверку критериев")
 
                 # Проверяем город
                 city_lower = (dialogue.vacancy.city or "").lower()
@@ -721,6 +795,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
                 if not is_spb:
                     # --- 2.1 НЕ СПБ (Регионы) ---
+                    log.info("Кандидат из региона (не СПб), передача анкеты рекрутеру", extra={"city": dialogue.candidate.city})
                     new_state = 'forwarded_to_researcher'
                     bot_response_text = "Спасибо! Я передам Вашу заявку нашим коллегам. Мы свяжемся с Вами в рабочее время, чтобы согласовать время собеседования."
                     # Логика перемещения в папку 'interview' и смены статуса на 'qualified' сработает ниже
@@ -736,13 +811,13 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
                     # Проверяем, входит ли хоть одна фраза из списка в название вакансии
                     if any(phrase in current_title_lower for phrase in excluded_vacancies):
-                        logger.info(f"[{dialogue.hh_response_id}] Вакансия '{vacancy_title}' (СПб) переведена на рекрутера (исключение).")
+                        log.info("Вакансия в СПб входит в список исключений, передача анкеты рекрутеру", extra={"title": vacancy_title})
                         new_state = 'forwarded_to_researcher'
                         bot_response_text = "Спасибо! Я передам Вашу заявку нашим коллегам. Мы свяжемся с Вами в рабочее время, чтобы согласовать время собеседования."
 
                     else:
                         # --- 2.2 СПБ (Запись на собеседование) ---
-                        logger.info(f"[{dialogue.hh_response_id}] Город СПб. Кандидат подходит. Добавляю команду для LLM на запись.")
+                        log.info("Запуск алгоритма автоматической записи на собеседование (СПб)")
 
 
                         # 2. ВАЖНО: Нам нужно сохранить текущие ответы пользователя в историю прямо сейчас.
@@ -778,6 +853,8 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
     #and dialogue.dialogue_state not in ['scheduling_spb_day', 'scheduling_spb_time', 'interview_scheduled_spb', 'init_scheduling_spb']  # <-- ДОБАВИТЬ
     #and new_state not in ['scheduling_spb_day', 'scheduling_spb_time', 'interview_scheduled_spb', 'init_scheduling_spb']
         and not is_candidate_profile_complete(dialogue.candidate)):
+            
+            log.info("Анкета заполнена не полностью, отправлен запрос недостающих данных")
             command_content = (
                 f"[SYSTEM COMMAND] Анкета кандидата не заполнена полностью. "
                 f"Используй историю диалога, чтобы определить, какие из необходимых данных (Возраст, гражданство, готовность выйти на работу, город) кандидат сообщил и верни их в 'extracted_data'. "
@@ -812,16 +889,11 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
         # --- НОВЫЙ БЛОК: Обработка состояния call_later ---
         if new_state == 'call_later':
-            # Благодаря selectinload(Dialogue.inactive_alerts) в начале функции,
-            # мы можем проверить наличие записи через атрибут
             if not dialogue.inactive_alerts:
-                db.add(InactiveNotificationQueue(
-                    dialogue_id=dialogue.id, 
-                    status='pending'
-                ))
-                logger.info(f"[{dialogue.hh_response_id}] Переход в state 'call_later'. Добавлена запись в InactiveNotificationQueue.")
+                db.add(InactiveNotificationQueue(dialogue_id=dialogue.id, status='pending'))
+                log.info("Диалог переведен в состояние 'call_later', добавлена запись в очередь молчунов")
             else:
-                logger.debug(f"[{dialogue.hh_response_id}] State 'call_later', но диалог уже есть в таблице молчунов. Пропускаем.")
+                log.debug("Диалог уже находится в очереди молчунов")
         # --------------------------------------------------
 
         if new_state in ['forwarded_to_researcher', 'interview_scheduled_spb'] and dialogue.status != 'qualified':
@@ -839,11 +911,12 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             if result.scalar() == 0:
                 db.add(NotificationQueue(candidate_id=dialogue.candidate.id, status='pending'))
 
-            logger.info(f"Candidate {dialogue.hh_response_id} qualified 🟢. Moving to 'interview'.")
+            
+            log.info("Кандидат квалифицирован 🟢(Qualified), перемещение в папку 'Собеседование'")
 
             api_move_start = time.monotonic()
             await hh_api.move_response_to_folder(recruiter, db, dialogue.hh_response_id, 'interview')
-            logger.debug(f"[{dialogue.hh_response_id}] API move: {time.monotonic() - api_move_start:.2f} sec.")
+            log.debug("Запрос на перемещение в папку 'interview' выполнен", extra={"duration_sec": round(time.monotonic() - api_move_start, 2)})
 
             # --- ДОБАВИТЬ ЭТОТ БЛОК КОДА ---
             if new_state == 'interview_scheduled_spb':
@@ -851,10 +924,10 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                 interview_time = extracted_data.get("interview_time")
 
                 if interview_date and interview_time:
-                    logger.info(
-                        f"Собеседование запланировано для диалога {dialogue.id} на "
-                        f"{interview_date} в {interview_time} (СПБ). Планирую напоминания."
-                    )
+                    log.info("Собеседование запланировано, напоминания созданы", extra={
+                        "interview_date": interview_date,
+                        "interview_time": interview_time
+                    })
                     await interview_reminder_manager.schedule_interview_reminders(
                         dialogue_id=dialogue.id,
                         interview_date_str=interview_date,
@@ -862,9 +935,9 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                         db_session=db
                     )
                 else:
-                    logger.error(
+                    log.error(
                         f"LLM установил 'interview_scheduled_spb', но не предоставил "
-                        f"interview_date или interview_time для диалога {dialogue.id}. Напоминания не будут запланированы."
+                        f"interview_date или interview_time для диалога. Напоминания не будут запланированы."
                     )
             # --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
@@ -899,14 +972,15 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                         user_message=full_context_for_llm,
                         current_datetime_utc=datetime.datetime.now(datetime.timezone.utc),
                         attempt_tracker=clarification_attempts,
-                        skip_instructions=True
+                        skip_instructions=True,
+                        log_context=log
                     )
 
                     # === УСПЕШНЫЙ ВЫЗОВ ===
                     total_attempts = len(clarification_attempts)
                     failed_attempts = total_attempts - 1
                     if failed_attempts > 0:
-                        logger.warning(f"[{dialogue.hh_response_id}] Уточнение declined_vacancy: {failed_attempts} скрытых ретраев.")
+                        log.warning("Повторные попытки при уточнении отказа от вакансии", extra={"retries": failed_attempts})
                         for i in range(failed_attempts):
                             retry_log = LlmUsageLog(
                                 dialogue_id=dialogue.id,
@@ -951,7 +1025,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
                 except Exception as e:
                     # === ПОЛНЫЙ ПРОВАЛ ===
-                    logger.warning(f"[{dialogue.hh_response_id}] Ошибка при уточнении 'declined_vacancy': {e}. Считаем отказом по умолчанию.")
+                    log.warning("Ошибка при попытке уточнить отказ от вакансии, используем отказ по умолчанию", extra={"error": str(e)})
                     total_fails = len(clarification_attempts)
                     for i in range(total_fails):
                         fail_log = LlmUsageLog(
@@ -973,7 +1047,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                         parsed = clarification_result['parsed_response']
                         is_real_decline = (parsed.get('answer') == 'yes')
                     except Exception as e:
-                        logger.warning(f"[{dialogue.hh_response_id}] Ошибка парсинга JSON при уточнении 'declined_vacancy': {e}")
+                        log.error("Ошибка парсинга JSON в ответе уточнения отказа", extra={"error": str(e)})
 
                 if not is_real_decline:
                     # Кандидат НЕ отказался → прерываем текущую обработку
@@ -986,10 +1060,10 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                     dialogue.pending_messages = (dialogue.pending_messages or []) + [system_command]
                     dialogue.last_updated = datetime.datetime.now(datetime.timezone.utc)
                     await db.commit()
-                    logger.info(f"[{dialogue.hh_response_id}] Отказ от вакансии НЕ подтверждён. Отложен системный запрос для повторной обработки.")
+                    log.info("Отказ от вакансии не подтвержден нейросетью, продолжаем диалог")
                     return  # ← ВАЖНО: выходим из функции, НЕ переводя в статус 'rejected'
                 else:
-                    logger.info(f"[{dialogue.hh_response_id}] Отказ от вакансии подтверждён LLM.")
+                    log.info("Отказ от вакансии подтвержден нейросетью")
                 # --- КОНЕЦ ДОПОЛНИТЕЛЬНОЙ ПРОВЕРКИ ---
 
 
@@ -1006,7 +1080,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                         processed_at=datetime.datetime.now(datetime.timezone.utc)
                     )
                 )
-                logger.info(f"[{dialogue.hh_response_id}] Статус 'declined_interview': все запланированные напоминания отменены.")
+                log.info("Кандидат отказался от собеседования, запланированные напоминания отменены")
             # -------------------------------------------------------
 
             
@@ -1019,20 +1093,17 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             # `dialogue.rejected_alerts` будет либо объектом RejectedNotificationQueue, либо None,
             # благодаря `uselist=False` в relationship.
             if dialogue.inactive_alerts:
-                logger.info(f"[{dialogue.hh_response_id}] Кандидат уже в таблице молчунов. Пропускаю запись в отказники.")
+                log.debug("Кандидат уже в списке молчунов, пропуск очереди отказников")
             else:
                 if dialogue.rejected_alerts:
                     # Запись уже существует. Если статус не 'pending', обновляем его.
                     if dialogue.rejected_alerts.status != 'pending':
-                        logger.debug(
-                            f"Уведомление об отклоненном кандидате для диалога {dialogue.hh_response_id} "
-                            f"уже существует со статусом '{dialogue.rejected_alerts.status}'. Обновляю статус на 'pending'."
-                        )
+                        log.debug("Уведомление об отказе уже существует, статус обновлен на 'pending'")
                         dialogue.rejected_alerts.status = 'pending'
                         dialogue.rejected_alerts.processed_at = None # Сбросим время обработки при переходе в pending
                         db.add(dialogue.rejected_alerts) # Добавляем для сохранения изменений
                     else:
-                        logger.debug(
+                        log.debug(
                             f"Уведомление об отклоненном кандидате для диалога {dialogue.hh_response_id} "
                             f"уже существует в RejectedNotificationQueue со статусом 'pending'.")
                 else:
@@ -1042,23 +1113,23 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                         status='pending'
                     )
                     db.add(new_rejected_alert)
-                    logger.info(
-                        f"Добавлено уведомление об отклоненном кандидате (диалог {dialogue.hh_response_id}) "
-                        f"в RejectedNotificationQueue."
-                    )
+                    log.info("Добавлена запись в очередь уведомлений об отказе (RejectedNotificationQueue)")
             # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА КОДА ---
 
 
 
-            logger.info(f"Candidate {dialogue.hh_response_id} rejected 🔴. Moving to 'assessment'.")
+            
+            log.info("Кандидат отклонен 🔴 (Rejected), перемещение в папку 'Отказ'")
 
             api_move_start = time.monotonic()
             await hh_api.move_response_to_folder(recruiter, db, dialogue.hh_response_id, 'assessment')
-            logger.debug(f"[{dialogue.hh_response_id}] API move: {time.monotonic() - api_move_start:.2f} sec.")
+            log.debug("Запрос на перемещение в папку 'assessment' выполнен", extra={ # <-- ЗАМЕНИ logger на log
+                "duration_sec": round(time.monotonic() - api_move_start, 2)
+            })
 
         # Если LLM не вернула текст, не отправляем сообщение
         if bot_response_text is None or bot_response_text == "":
-            logger.info(f"[{dialogue.hh_response_id}] LLM вернула пустой ответ. Обновляем состояние без отправки сообщения.")
+            log.info("Нейросеть вернула пустой текст, обновление стейта без отправки сообщения")
 
             # Сохраняем историю пользователя
             new_history = (dialogue.history or []) + user_entries_to_history
@@ -1099,25 +1170,27 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             await db.flush()
             await db.commit()
 
-            logger.info(f"Dialogue {dialogue.hh_response_id} processed successfully")
+            log.info("Сообщение от бота успешно отправлено кандидату в HH")
         elif message_sent == 403:
-            logger.warning(f"Failed to send message for dialogue {dialogue.hh_response_id}. Clearing pending messages to avoid loop.")
+            log.warning("Не удалось отправить сообщение: вакансия закрыта или резюме удалено (403)")
             dialogue.pending_messages = None
             await db.commit() # Сохраняем сброс очереди сообщений
             return
         else:
-            logger.error(f"Failed to send message for dialogue {dialogue.hh_response_id}")
+            log.error("Ошибка при отправке сообщения в HH API", extra={"status_code": message_sent})
             await db.rollback()
             return
 
     except Exception as e:
-        logger.error(f"Critical error processing dialogue {dialogue_id}: {e}", exc_info=True)
+        log.critical("Критический сбой при обработке диалога", exc_info=True)
         if db and db.is_active:
             await db.rollback()
         raise  # Важно: пробрасываем исключение дальше
 
     finally:
-        logger.debug(f"[{log_dialogue_hh_response_id}] Processing finished in: {time.monotonic() - dialogue_processing_start_time:.2f} sec.")
+        log.debug("Обработка диалога полностью завершена", extra={
+            "total_processing_time": round(time.monotonic() - dialogue_processing_start_time, 2)
+        })
 
 
 async def process_any_pending_dialogues(prompt_library: dict):
@@ -1156,7 +1229,10 @@ async def process_any_pending_dialogues(prompt_library: dict):
         if not tasks_to_do:
             return 0
 
-        logger.info(f"Процессор взял в работу {len(tasks_to_do)} диалогов.")
+        logger.info("Захвачена пачка диалогов для обработки", extra={
+            "batch_size": len(tasks_to_do),
+            "dialogue_ids": [task.id for task in tasks_to_do]
+        })
 
         async def run_task(d_id, r_id):
             async with semaphore:
@@ -1165,7 +1241,11 @@ async def process_any_pending_dialogues(prompt_library: dict):
                     try:
                         await _process_single_dialogue(d_id, r_id, prompt_library, task_db)
                     except Exception as e:
-                        logger.error(f"Ошибка обработки диалога {d_id}: {e}")
+                        logger.error("Сбой при обработке диалога внутри задачи", extra={
+                            "dialogue_id": d_id,
+                            "recruiter_id": r_id,
+                            "error": str(e)
+                        }, exc_info=True)
 
         # Запускаем обработку пачки параллельно
         await asyncio.gather(*(run_task(tid, rid) for tid, rid in tasks_to_do))
@@ -1174,7 +1254,7 @@ async def process_any_pending_dialogues(prompt_library: dict):
 
 
 async def run_processor_cycle():
-    logger.info("Воркер-процессор запущен и мониторит БД...")
+    logger.info("Главный цикл воркера-процессора запущен")
     prompt_library = knowledge_base.get_prompt_library()
     
     while not shutdown_requested:
@@ -1182,7 +1262,11 @@ async def run_processor_cycle():
         
         # Обрабатываем диалоги
         processed_count = await process_any_pending_dialogues(prompt_library)
-        
+        if processed_count > 0:
+            logger.debug("Итерация цикла обработки завершена", extra={
+                "processed_count": processed_count,
+                "iteration_duration_sec": round(time.monotonic() - start_time, 2)
+            })
         # Если работы было много, не спим, сразу проверяем еще раз
         # Если работы не было — спим 1-2 секунды
         if processed_count == 0:

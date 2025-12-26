@@ -9,10 +9,10 @@ services:
       # Подключаемся к твоей внешней БД (замени на реальный IP если localhost не сработает)
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@host.docker.internal:${DB_PORT}/${DB_NAME}
       - POOL_MODE=transaction
-      - MAX_CLIENT_CONN=500
-      - DEFAULT_POOL_SIZE=20
-      - MIN_POOL_SIZE=5
-      - RESERVE_POOL_SIZE=5
+      - MAX_CLIENT_CONN=2000
+      - DEFAULT_POOL_SIZE=80
+      - MIN_POOL_SIZE=20
+      - RESERVE_POOL_SIZE=10
       - AUTH_TYPE=any # Для упрощения, т.к. БД внешняя
     ports:
       - "6432:6432"

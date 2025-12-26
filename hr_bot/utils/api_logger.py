@@ -1,25 +1,29 @@
-# hr_bot/utils/api_logger.py
 import logging
+import sys
 import os
+# Импортируем наш JSON-форматтер из основного конфига
+from .logger_config import CustomJsonFormatter
 
 def setup_api_logger():
-    """Настраивает отдельный логгер для записи сырых API-запросов и ответов."""
-    log_dir = 'logs'
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-
+    """Настраивает JSON-логгер для записи сырых API-запросов и ответов в stdout."""
+    
+    # Имя логгера оставляем RawAPI, чтобы в Grafana фильтровать по полю logger_name
     api_logger = logging.getLogger('RawAPI')
     api_logger.setLevel(logging.DEBUG)
+    
+    # Отключаем передачу логов корневому логгеру, чтобы не было дублей в консоли
     api_logger.propagate = False
 
     if api_logger.hasHandlers():
         api_logger.handlers.clear()
 
-    formatter = logging.Formatter('%(asctime)s\n%(message)s\n' + '='*80)
+    # В Docker пишем только в консоль (Loki это заберет)
+    console_handler = logging.StreamHandler(sys.stdout)
     
-    # Будем писать в файл test00.log. `mode='a'` означает 'append' - дописывать в конец.
-    file_handler = logging.FileHandler(os.path.join(log_dir, 'test00.log'), mode='a', encoding='utf-8')
-    file_handler.setFormatter(formatter)
+    # Используем наш JSON-форматтер
+    formatter = CustomJsonFormatter('%(timestamp)s %(level)s %(name)s %(message)s')
+    console_handler.setFormatter(formatter)
     
-    api_logger.addHandler(file_handler)
+    api_logger.addHandler(console_handler)
+    
     return api_logger

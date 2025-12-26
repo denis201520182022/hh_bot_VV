@@ -54,11 +54,11 @@ logger.info(f"Клиент OpenAI настроен на работу через 
     # По умолчанию tenacity повторяет попытки для любого исключения, наследующегося от Exception.
     # Поэтому retry_if_exception_type явно указывать не нужно для "любых ошибок".
 )
-async def get_bot_response(system_prompt: str, dialogue_history: list, user_message: str, current_datetime_utc: datetime.datetime, attempt_tracker: list = None, skip_instructions: bool = False) -> dict:
+async def get_bot_response(system_prompt: str, dialogue_history: list, user_message: str, current_datetime_utc: datetime.datetime, attempt_tracker: list = None, skip_instructions: bool = False, log_context: logging.LoggerAdapter = None) -> dict:
     """
     Асинхронно отправляет запрос в OpenAI через прокси и получает ответ.
     """
-
+    log = log_context or logger
     # --- ДОБАВЛЕНО: СЧЕТЧИК ПОПЫТОК ---
     # При каждом запуске (включая ретраи) добавляем метку в список
     if attempt_tracker is not None:
@@ -72,7 +72,7 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
     messages.append({"role": "user", "content": user_message})
     #print(messages)
     try:
-        logger.info(f"Отправка запроса к LLM через прокси...")
+        log.info("Отправка запроса в OpenAI", extra={"model": "gpt-4o-mini", "use_proxy": True})
 
         # --- ДОБАВЛЕНО: Использование семафора ---
         async with LLM_SEMAPHORE:
@@ -97,22 +97,15 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
         if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details is not None:
             cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0)
 
-        # Выводим информацию о токенах и кеше
-        print("\n=== ТОКЕНЫ И КЕШ ===")
-        print(f"📊 Всего токенов: {usage.total_tokens}")
-        print(f"💬 Input токены: {usage.prompt_tokens}")
-        print(f"📤 Output токены: {usage.completion_tokens}")
-        print(f"⚡ Кешированные токены: {cached_tokens}")
-
-        if usage.prompt_tokens > 0:
-            cache_percent = (cached_tokens / usage.prompt_tokens) * 100
-            print(f"📈 Процент кеша: {cache_percent:.1f}%")
-        print()
-
-        logger.info("Успешный ответ от LLM получен.")
-        logger.info(f"Использовано токенов - Total: {usage.total_tokens}, Input: {usage.prompt_tokens}, Output: {usage.completion_tokens}, Cached: {cached_tokens}")
-
-        print(response_content)
+        log.info("Успешный ответ от LLM получен", extra={
+            "total_tokens": usage.total_tokens,
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.completion_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_percent": round((cached_tokens / usage.prompt_tokens * 100), 1) if usage.prompt_tokens > 0 else 0
+        })
+        log.debug("Сырой ответ LLM", extra={"content": response_content})
+        
         parsed_response = json.loads(response_content)
 
         # --- ИЗМЕНИТЬ ЭТУ ЧАСТЬ (чтобы вернуть статистику наружу) ---
@@ -130,7 +123,11 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
     except Exception as e:
         # Логируем, что произошла ошибка и будет предпринята повторная попытка.
         # Tenacity сам логирует попытки на уровне INFO, но здесь можно добавить WARN.
-        logger.warning(f"Ошибка при запросе к OpenAI: {type(e).__name__}: {e}. Будет предпринята повторная попытка (если не исчерпаны).", exc_info=True)
+        log.warning("Ошибка при обращении к API OpenAI", extra={
+            "error_type": type(e).__name__,
+            "error_msg": str(e),
+            "will_retry": True
+        }, exc_info=True)
         # КРИТИЧЕСКИ ВАЖНО: Перевыбрасываем исключение, чтобы декоратор @retry мог его поймать
         # и решить, нужно ли повторять попытку.
         raise
