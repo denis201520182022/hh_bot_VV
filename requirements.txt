@@ -16,3 +16,4 @@ tenacity
 aiolimiter
 asyncpg
 xlsxwriter
+python-json-logger

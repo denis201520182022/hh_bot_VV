@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # --- ПРОСЛОЙКА ДЛЯ БАЗЫ ДАННЫХ ---
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: hr_bot_pgbouncer
+    environment:
+      # Подключаемся к твоей внешней БД (замени на реальный IP если localhost не сработает)
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@host.docker.internal:${DB_PORT}/${DB_NAME}
+      - POOL_MODE=transaction
+      - MAX_CLIENT_CONN=500
+      - DEFAULT_POOL_SIZE=20
+      - MIN_POOL_SIZE=5
+      - RESERVE_POOL_SIZE=5
+      - AUTH_TYPE=any # Для упрощения, т.к. БД внешняя
+    ports:
+      - "6432:6432"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  # --- ВОРКЕР: СБОРЩИК (POLLER) ---
+  poller:
+    build: .
+    container_name: hr_bot_poller
+    command: python worker_poller.py
+    depends_on:
+      - pgbouncer
+    env_file: .env
+    environment:
+      - DB_HOST=pgbouncer
+      - DB_PORT=6432
+    restart: always
+
+  # --- ВОРКЕР: ОБРАБОТЧИК (PROCESSOR) ---
+  processor:
+    build: .
+    container_name: hr_bot_processor
+    command: python worker_processor.py
+    depends_on:
+      - pgbouncer
+    env_file: .env
+    environment:
+      - DB_HOST=pgbouncer
+      - DB_PORT=6432
+    # Можно масштабировать командой: docker-compose up -d --scale processor=2
+    restart: always
+
+  # --- ВОРКЕР: НАПОМИНАНИЯ (REMINDERS) ---
+  reminders:
+    build: .
+    container_name: hr_bot_reminders
+    command: python worker_reminders.py
+    depends_on:
+      - pgbouncer
+    env_file: .env
+    environment:
+      - DB_HOST=pgbouncer
+      - DB_PORT=6432
+    restart: always
+
+  # --- ТЕЛЕГРАМ БОТ (УПРАВЛЕНИЕ) ---
+  # tg_bot:
+  #   build: .
+  #   container_name: hr_bot_tg
+  #   command: python run_telegram_bot.py
+  #   depends_on:
+  #     - pgbouncer
+  #   env_file: .env
+  #   environment:
+  #     - DB_HOST=pgbouncer
+  #     - DB_PORT=6432
+  #   restart: always
+
+  # --- МОНИТОРИНГ ЛОГОВ ---
+  loki:
+    image: grafana/loki:latest
+    container_name: hr_bot_loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: always
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hr_bot_grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - loki
+    restart: always

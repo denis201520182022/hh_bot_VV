@@ -41,139 +41,142 @@ _refresh_locks = {} # Словарь для хранения локов по ID 
 async def get_access_token(recruiter: TrackedRecruiter, db: AsyncSession) -> str | None: 
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # 1. Быстрая проверка токена (без лока)
+    # 1. Быстрая проверка токена (без блокировок — «оптимистичный» путь)
     if recruiter.access_token and recruiter.token_expires_at and recruiter.token_expires_at > now:
         return recruiter.access_token
 
-    # 2. Получаем или создаем лок для этого рекрутера
+    # 2. Получаем или создаем локальный лок (защита от потоков внутри ОДНОГО процесса)
     lock = _refresh_locks.setdefault(recruiter.recruiter_id, asyncio.Lock())
 
-    # 3. Захватываем лок, чтобы только одна задача могла обновлять токен для этого рекрутера
     async with lock:
-        # --- ДОБАВЛЕНО: ОБНОВЛЕНИЕ ОБЪЕКТА РЕКРУТЕРА ИЗ БД ---
-        await db.refresh(recruiter) # Принудительно обновляем данные рекрутера из БД
-        # --- КОНЕЦ ДОБАВЛЕННОГО БЛОКА ---
+        # --- КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Блокировка строки в БД (защита от ДРУГИХ процессов/воркеров) ---
+        # Мы запрашиваем строку рекрутера с блокировкой FOR UPDATE.
+        # Если другой воркер уже обновляет этот токен, наш текущий воркер ПРИОСТАНОВИТСЯ на этой строке.
+        try:
+            stmt = select(TrackedRecruiter).filter_by(id=recruiter.id).with_for_update()
+            result = await db.execute(stmt)
+            db_recruiter = result.scalar_one_or_none()
 
-        # 4. Повторная проверка токена (вдруг пока мы ждали лока, другая задача уже обновила его)
-        if recruiter.access_token and recruiter.token_expires_at and recruiter.token_expires_at > now:
-            return recruiter.access_token
+            if not db_recruiter:
+                logger.error(f"Рекрутер с ID {recruiter.id} не найден в БД при блокировке.")
+                return None
 
-        # Если мы дошли сюда, значит токен действительно нужно обновить и мы единственные, кто это делает.
-        logger.info(f"Токен для рекрутера {recruiter.name} истек или отсутствует. Обновляю...")
-        epp = f"Токен для рекрутера {recruiter.name} истек или отсутствует. Обновляю..."
-        await send_system_alert(epp, alert_type="admin_only")
-        if not recruiter.refresh_token:
-            logger.error(f"У рекрутера {recruiter.name} (ID: {recruiter.recruiter_id}) нет refresh_token!")
-            error_message = (
-                f"🔴 КРИТИЧЕСКАЯ ОШИБКА АВТОРИЗАЦИИ\n\n"
-                f"Бот остановлен для рекрутера: {recruiter.name}\n\n"
-                f"Причина: Отсутствует refresh_token в базе данных.\n"
-                f"Действие: Требуется провести повторную авторизацию."
+            # 4. Повторная проверка токена ПОСЛЕ получения всех блокировок.
+            # Вдруг пока мы ждали очереди, другой воркер (процесс) уже обновил токен в БД.
+            if db_recruiter.access_token and db_recruiter.token_expires_at and db_recruiter.token_expires_at > now:
+                # Синхронизируем наш текущий объект с данными из БД и возвращаем свежий токен
+                recruiter.access_token = db_recruiter.access_token
+                recruiter.refresh_token = db_recruiter.refresh_token
+                recruiter.token_expires_at = db_recruiter.token_expires_at
+                return recruiter.access_token
+
+            # Если мы дошли сюда, значит токен в БД все еще просрочен, и мы — ПЕРВЫЙ процесс, 
+            # который получил право на обновление.
+            
+            logger.info(f"Токен для рекрутера {db_recruiter.name} истек или отсутствует. Обновляю...")
+            epp = f"Токен для рекрутера {db_recruiter.name} истек или отсутствует. Обновляю..."
+            await send_system_alert(epp, alert_type="admin_only")
+
+            if not db_recruiter.refresh_token:
+                logger.error(f"У рекрутера {db_recruiter.name} (ID: {db_recruiter.recruiter_id}) нет refresh_token!")
+                error_message = (
+                    f"🔴 КРИТИЧЕСКАЯ ОШИБКА АВТОРИЗАЦИИ\n\n"
+                    f"Бот остановлен для рекрутера: {db_recruiter.name}\n\n"
+                    f"Причина: Отсутствует refresh_token в базе данных.\n"
+                    f"Действие: Требуется провести повторную авторизацию."
+                )
+                await send_system_alert(error_message, alert_type="admin_only")
+                return None
+
+            url = "https://api.hh.ru/token"
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": db_recruiter.refresh_token,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            }
+
+            request_log = (
+                f"🚨🚨🚨TOKEN EXCHANGE REQUEST -->\n  Method: POST\n  URL: {url}\n"
+                f"  Data: {data}"
             )
-            await send_system_alert(error_message, alert_type="admin_only")
-            return None
+            api_raw_logger.info(request_log)
 
-        url = "https://api.hh.ru/token"
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": recruiter.refresh_token,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        }
+            async with HH_API_RATE_LIMITER:
+                async with API_SEMAPHORE:
+                    response = await shared_api_client.post(url, data=data)
 
-        request_log = (
-            f"🚨🚨🚨TOKEN EXCHANGE REQUEST -->\n  Method: POST\n  URL: {url}\n"
-            f"  Data: {data}"
-        )
-        api_raw_logger.info(request_log)
+            response_log = (
+                f"<--🚨🚨🚨 TOKEN EXCHANGE RESPONSE\n  Status Code: {response.status_code}\n"
+                f"  Headers: {response.headers}\n  Body: {response.text}"
+            )
 
-        async with HH_API_RATE_LIMITER:
-            async with API_SEMAPHORE:
+            if response.status_code != 200:
+                api_raw_logger.warning(response_log)
+                await send_system_alert(f"🔴 ВНИМАНИЕ: Неуспешная попытка обновления токена для {db_recruiter.name}", alert_type="admin_only")
+            else:
+                api_raw_logger.info(response_log)
+                await send_system_alert(f"✅ Успешно получен токен для {db_recruiter.name}", alert_type="admin_only")
+
+            if response.status_code == 200:
+                tokens = response.json()
+                # Обновляем заблокированный в БД объект
+                db_recruiter.access_token = tokens["access_token"]
+                if "refresh_token" in tokens:
+                    db_recruiter.refresh_token = tokens["refresh_token"]
+                db_recruiter.token_expires_at = now + datetime.timedelta(seconds=tokens["expires_in"] - 300)
                 
-                response = await shared_api_client.post(url, data=data)
+                # Фиксируем изменения в БД и СНИМАЕМ блокировку строки
+                db.add(db_recruiter) 
+                await db.commit() 
+                
+                # Синхронизируем локальный объект recruiter (чтобы вызывающий код увидел изменения)
+                recruiter.access_token = db_recruiter.access_token
+                recruiter.refresh_token = db_recruiter.refresh_token
+                recruiter.token_expires_at = db_recruiter.token_expires_at
 
-        response_log = (
-            f"<--🚨🚨🚨 TOKEN EXCHANGE RESPONSE\n  Status Code: {response.status_code}\n"
-            f"  Headers: {response.headers}\n  Body: {response.text}"
-        )
-        if response.status_code != 200:
-            api_raw_logger.warning(response_log)
-            await send_system_alert(f"🔴 ВНИМАНИЕ: Неуспешная попытка обновления токена для {recruiter.name}", alert_type="admin_only")
-        else:
-            api_raw_logger.info(response_log)
-            await send_system_alert(f"✅ Успешно получен токен для {recruiter.name}", alert_type="admin_only")
+                logger.info(f"Успешно получен новый access_token для рекрутера {recruiter.name}.")
+                await send_system_alert(f"✅ Успешно сохранен новый токен для {recruiter.name}.", alert_type="admin_only")
+                return recruiter.access_token
+            else:
+                # Обработка ошибок (оригинальная логика сохранена)
+                try:
+                    error_data = response.json()
+                    error_description = error_data.get("error_description")
+                    oauth_error = error_data.get("oauth_error")
 
-        if response.status_code == 200:
-            tokens = response.json()
-            recruiter.access_token = tokens["access_token"]
-            if "refresh_token" in tokens:
-                recruiter.refresh_token = tokens["refresh_token"]
-            recruiter.token_expires_at = now + datetime.timedelta(seconds=tokens["expires_in"] - 300)
-            # ИЗМЕНЕНИЕ: db.add(recruiter) вместо await asyncio.to_thread(db.add, recruiter)
-            db.add(recruiter) 
-            # ИЗМЕНЕНИЕ: await db.commit() вместо await asyncio.to_thread(db.commit)
-            await db.commit() 
-            logger.info(f"Успешно получен новый access_token для рекрутера {recruiter.name}.")
-            await send_system_alert(f"✅ Успешно сохранен новый токен для {recruiter.name}.", alert_type="admin_only")
-            return recruiter.access_token
-        else:
-            try:
-                error_data = response.json()
-                error_description = error_data.get("error_description")
-                oauth_error = error_data.get("oauth_error")
+                    if error_description == "token not expired":
+                        logger.info(f"Попытка обновить токен для {db_recruiter.name} отклонена: токен еще не истек. Возвращаем старый.")
+                        db_recruiter.token_expires_at = now + datetime.timedelta(minutes=5)
+                        db.add(db_recruiter)
+                        await db.commit()
+                        return db_recruiter.access_token
+                    
+                    elif error_description in ["password invalidated", "token deactivated"] or oauth_error == "token-revoked":
+                        logger.critical(f"Критическая ошибка авторизации для {db_recruiter.name}: {response.text}")
+                        error_message = (
+                            f"🔴 КРИТИЧЕСКАЯ ОШИБКА АВТОРИЗАЦИИ\n\n"
+                            f"Бот остановлен для рекрутера: {db_recruiter.name}\n\n"
+                            f"Причина от HH.ru: {response.text}\n\n"
+                            f"Действие: Требуется провести повторную авторизацию (восстановить пароль)."
+                        )
+                        await send_system_alert(error_message, alert_type="admin_only")
+                        return None
+                    else:
+                        logger.critical(f"Ошибка обновления токена для {db_recruiter.name}: {response.text}")
+                        await send_system_alert(f"🔴 КРИТИЧЕСКАЯ ОШИБКА: {response.text}", alert_type="admin_only")
+                        return None
 
-                if error_description == "token not expired":
-                    logger.info(
-                        f"Попытка обновить токен для {recruiter.name} отклонена: токен еще не истек. "
-                        f"Возвращаем старый токен, так как он все еще действителен."
-                    )
-                    recruiter.token_expires_at = now + datetime.timedelta(minutes=5)
-                    # ИЗМЕНЕНИЕ: db.add(recruiter) вместо await asyncio.to_thread(db.add, recruiter)
-                    db.add(recruiter)
-                    # ИЗМЕНЕНИЕ: await db.commit() вместо await asyncio.to_thread(db.commit)
-                    await db.commit()
-                    return recruiter.access_token
-                elif error_description in ["password invalidated", "token deactivated"] or oauth_error == "token-revoked":
-                    logger.critical(f"Критическая ошибка авторизации для {recruiter.name}: {response.text}")
-                    error_message = (
-                        f"🔴 КРИТИЧЕСКАЯ ОШИБКА АВТОРИЗАЦИИ\n\n"
-                        f"Бот остановлен для рекрутера: {recruiter.name}\n\n"
-                        f"Причина от HH.ru: {response.text}\n\n"
-                        f"Действие: Требуется провести повторную авторизацию (восстановить пароль)."
-                    )
-                    await send_system_alert(error_message, alert_type="admin_only")
+                except json.JSONDecodeError:
+                    logger.critical(f"Критическая ошибка API (не JSON) для {db_recruiter.name}: {response.text}")
                     return None
-                else:
-                    logger.critical(f"Ошибка обновления токена для {recruiter.name}: {response.text}")
-                    error_message = (
-                        f"🔴 КРИТИЧЕСКАЯ ОШИБКА АВТОРИЗАЦИИ\n\n"
-                        f"Бот остановлен для рекрутера: {recruiter.name}\n\n"
-                        f"Причина от HH.ru: {response.text}\n\n"
-                        f"Действие: Требуется провести повторную авторизацию."
-                    )
-                    await send_system_alert(error_message, alert_type="admin_only")
+                except Exception as e:
+                    logger.critical(f"Неизвестная ошибка для {db_recruiter.name}: {e}")
                     return None
-
-            except json.JSONDecodeError:
-                logger.critical(f"Критическая ошибка при обработке неудачного обновления токена для {recruiter.name}: {response.text}")
-                error_message = (
-                    f"🔴 КРИТИЧЕСКАЯ ОШИБКА API\n\n"
-                    f"Бот остановлен для рекрутера: {recruiter.name}\n\n"
-                    f"Причина: HH.ru вернул нечитаемый ответ (не JSON) при попытке обновить токен. Возможно, на их стороне сбой.\n\n"
-                    f"Текст ответа: {response.text}"
-                )
-                await send_system_alert(error_message, alert_type="admin_only")
-                return None
-            except Exception as e:
-                logger.critical(f"Неизвестная ошибка при обработке ответа токена для {recruiter.name}: {e}, Response: {response.text}")
-                error_message = (
-                    f"🔴 НЕИЗВЕСТНАЯ ОШИБКА\n\n"
-                    f"Бот остановлен для рекрутера: {recruiter.name}\n\n"
-                    f"Причина: {e}\n\n"
-                    f"Текст ответа: {response.text}"
-                )
-                await send_system_alert(error_message, alert_type="admin_only")
-                return None
+        except Exception as e:
+            logger.error(f"Ошибка в блоке транзакции get_access_token: {e}")
+            await db.rollback()
+            return None
                 
 @retry(
     stop=stop_after_attempt(3),  # Пытаемся 3 раза (1 оригинал + 2 повтора)
