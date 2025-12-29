@@ -107,7 +107,7 @@ services:
     image: grafana/grafana:latest
     container_name: hr_bot_grafana
     ports:
-      - "3000:3000"
+      - "3001:3000"
     depends_on:
       - loki
     restart: always
