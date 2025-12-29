@@ -604,7 +604,6 @@ def _log_missing_vacancy(title: str, city: str):
     except Exception as e:
         # Логируем ошибку, но не ломаем работу бота
         logger.error(f"Ошибка при записи в missing_vacancies.txt: {e}")
-
 def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_city: str) -> str:
     """
     Поиск вакансии по принципу BEST MATCH (Лучшее совпадение).
@@ -612,72 +611,99 @@ def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_cit
     """
 
     def normalize_text(text: str) -> str:
-        if not text: 
+        if not text:
             return ""
-        text = text.lower().replace('ё', 'е')
-        text = re.sub(r'[^\w\s]', ' ', text)
+        text = text.lower().replace("ё", "е")
+        text = re.sub(r"[^\w\s]", " ", text)
         return " ".join(text.split())
 
     def get_similarity(str1: str, str2: str) -> float:
-        """Возвращает коэффициент сходства от 0.0 до 1.0"""
         if not str1 or not str2:
             return 0.0
         if str1 in str2 or str2 in str1:
-            return 1.0 # Полное вхождение считаем идеальным
+            return 1.0
         return difflib.SequenceMatcher(None, str1, str2).ratio()
 
-    logger.debug(f"🔍 Поиск вакансии (Best Match): '{vacancy_title}' в '{vacancy_city}'")
+    logger.debug(
+        "🔍 Поиск вакансии (Best Match): title='%s', city='%s'",
+        vacancy_title,
+        vacancy_city,
+    )
 
     norm_input_title = normalize_text(vacancy_title)
     norm_input_city = normalize_text(vacancy_city)
 
-    best_match_description = None
+    best_match_vacancy = None
     best_match_score = 0.0
 
-    # Перебираем ВСЕ вакансии
+    # Перебираем все вакансии
     for vacancy in prompt_library.get("vacancies", []):
-        
-        # 1. Считаем лучший балл по городу в этом блоке
+
+        # --- ГОРОД ---
         best_city_score = 0.0
         for db_city_raw in vacancy.get("cities", []):
             score = get_similarity(norm_input_city, normalize_text(db_city_raw))
-            if score > best_city_score:
-                best_city_score = score
-        
-        # Если город совсем не похож (меньше 0.65), этот блок нам точно не нужен
+            best_city_score = max(best_city_score, score)
+
         if best_city_score < 0.65:
             continue
 
-        # 2. Считаем лучший балл по названию в этом блоке
+        # --- НАЗВАНИЕ ---
         best_title_score = 0.0
         for db_title_raw in vacancy.get("titles", []):
             score = get_similarity(norm_input_title, normalize_text(db_title_raw))
-            if score > best_title_score:
-                best_title_score = score
-        
-        # Если название не похоже (меньше 0.65), пропускаем
+            best_title_score = max(best_title_score, score)
+
         if best_title_score < 0.65:
             continue
 
-        # 3. Суммарный балл текущего блока
         total_score = best_city_score + best_title_score
 
-        # Если этот блок подходит лучше, чем предыдущий найденный
+        # ЛОГ ВСЕХ КАНДИДАТОВ (для отладки)
+        logger.debug(
+            "🧪 Кандидат | titles=%s | cities=%s | city=%.2f | title=%.2f | total=%.2f",
+            vacancy.get("titles"),
+            vacancy.get("cities"),
+            best_city_score,
+            best_title_score,
+            total_score,
+        )
+
+        # ЛУЧШИЙ КАНДИДАТ
         if total_score > best_match_score:
             best_match_score = total_score
-            best_match_description = vacancy["description"]
-            # Логируем кандидата на победу
-            # logger.debug(f"📈 Новый лидер: {vacancy.get('titles')[0]} (Score: {total_score:.2f})")
+            best_match_vacancy = vacancy
 
-    if best_match_description:
-        logger.info(f"✅ Выбрано лучшее совпадение (Score: {best_match_score:.2f})")
-        return best_match_description
+            logger.debug(
+                "📈 Новый лидер | titles=%s | cities=%s | score=%.2f",
+                vacancy.get("titles"),
+                vacancy.get("cities"),
+                total_score,
+            )
 
-    # Если ничего не нашли
-    logger.warning(f"🤡 Не найдено точное описание для '{vacancy_title}' в '{vacancy_city}'.")
+    # --- ФИНАЛ ---
+    if best_match_vacancy:
+        logger.info(
+            "✅ ВЫБРАНО ОПИСАНИЕ | titles=%s | cities=%s | final_score=%.2f",
+            best_match_vacancy.get("titles"),
+            best_match_vacancy.get("cities"),
+            best_match_score,
+        )
+        return best_match_vacancy.get("description", "")
+
+    # НИЧЕГО НЕ НАШЛИ
+    logger.warning(
+        "🤡 Описание не найдено | title='%s' | city='%s'",
+        vacancy_title,
+        vacancy_city,
+    )
     _log_missing_vacancy(vacancy_title, vacancy_city)
-    
-    return "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. Отвечай на вопросы кандидата на основе общей информации из FAQ."
+
+    return (
+        "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. "
+        "Отвечай на вопросы кандидата на основе общей информации из FAQ."
+    )
+
 def _generate_calendar_context() -> str:
     """
     Генерирует текстовый блок с календарем и правилами работы с датами.
