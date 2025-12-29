@@ -779,26 +779,60 @@ def _generate_calendar_context() -> str:
     moscow_tz = ZoneInfo("Europe/Moscow")
     current_datetime_utc = datetime.datetime.now(moscow_tz)
     weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    
+    # Словарь для склонения в "следующий/следующая/следующее"
+    weekday_next_form = {
+        "понедельник": "Следующий понедельник",
+        "вторник": "Следующий вторник",
+        "среда": "Следующая среда",
+        "четверг": "Следующий четверг",
+        "пятница": "Следующая пятница",
+        "суббота": "Следующая суббота",
+        "воскресенье": "Следующее воскресенье"
+    }
 
     current_weekday = weekdays_ru[current_datetime_utc.weekday()]
     current_date_str = current_datetime_utc.strftime("%Y-%m-%d")
     current_time_str = current_datetime_utc.strftime("%H:%M")
 
+    # Собираем информацию о днях недели для отслеживания повторений
+    weekday_occurrences = {}
+    
     calendar_context_lines = []
-    for i in range(14):  # Сегодня + 13 дней вперед = 14 дней
+    for i in range(14):
         date_cursor = current_datetime_utc + datetime.timedelta(days=i)
         wd_name = weekdays_ru[date_cursor.weekday()]
         date_str = date_cursor.strftime("%Y-%m-%d")
-
-        label = ""
+        
+        # Отслеживаем, сколько раз встречался этот день недели
+        if wd_name not in weekday_occurrences:
+            weekday_occurrences[wd_name] = 0
+        weekday_occurrences[wd_name] += 1
+        
+        # Формируем префикс и суффикс
+        prefix = ""
+        suffix = ""
+        
         if i == 0:
-            label = " ← ТЫ ЗДЕСЬ (СЕГОДНЯ)"
+            prefix = "(СЕГОДНЯ) "
+            suffix = " ← ТЫ ЗДЕСЬ"
+            day_label = wd_name.capitalize()
         elif i == 1:
-            label = " ← ЗАВТРА"
+            prefix = "(ЗАВТРА) "
+            day_label = wd_name.capitalize()
         elif i == 2:
-            label = " ← ПОСЛЕЗАВТРА"
-
-        calendar_context_lines.append(f"{wd_name}: {date_str}{label}")
+            prefix = "(ПОСЛЕЗАВТРА) "
+            day_label = wd_name.capitalize()
+        else:
+            # Для остальных дней
+            if weekday_occurrences[wd_name] == 2:
+                # Второе упоминание дня недели - добавляем "Следующий"
+                day_label = weekday_next_form[wd_name]
+            else:
+                # Первое упоминание или третье+ - просто название с заглавной
+                day_label = wd_name.capitalize()
+        
+        calendar_context_lines.append(f"{prefix}{date_str} {day_label}{suffix}")
 
     calendar_string = "\n".join(calendar_context_lines)
 
@@ -811,16 +845,24 @@ def _generate_calendar_context() -> str:
         f"Используй ТОЛЬКО эту таблицу (таблица начинается с СЕГОДНЯ и идет на 14 дней вперед):\n\n"
         f"{calendar_string}\n\n"
         f"ПРАВИЛА РАБОТЫ С ДАТАМИ:\n"
-        f"1. Если кандидат говорит конкретный день недели БЕЗ уточнений (например, просто 'понедельник'):\n"
-        f"   → Бери ПЕРВЫЙ такой день (то есть ближайший) из списка выше\n\n"
+        f"1. Кандидат говорит просто день недели ('понедельник', 'вторник'):\n"
+        f"   → Найди ПЕРВУЮ строку с этим днем (без слова 'Следующий')\n"
+        f"   → Скопируй дату из этой строки\n\n"
         f"2. Если кандидат говорит 'СЛЕДУЮЩИЙ [день недели]' (например, 'следующий понедельник'):\n"
-        f"   → Бери ВТОРОЙ такой день из списка выше\n\n"
+        f"   → Бери такой день из списка выше, где написано 'СЛЕДУЮЩИЙ [день недели]' (например, 'следующий понедельник')\n\n"
+        f"   → Скопируй дату из этой строки\n\n"
         f"3. Если кандидат называет день недели, который совпадает с СЕГОДНЯ:\n"
         f"   → ОБЯЗАТЕЛЬНО уточни: 'Вы имеете в виду сегодня или через неделю?'\n\n"
         f"4. Если кандидат говорит 'сегодня', 'завтра', 'послезавтра':\n"
-        f"   → Ищи в списке пометку '← СЕГОДНЯ', '← ЗАВТРА' или '← ПОСЛЕЗАВТРА'\n\n"
+        f"   → Ищи в списке пометку 'СЕГОДНЯ', 'ЗАВТРА' или 'ПОСЛЕЗАВТРА'\n\n"
         f"5. ВСЕГДА копируй дату ТОЧНО из таблицы в формате YYYY-MM-DD\n"
         f"6. НИКОГДА не изобретай даты сам - только из этой таблицы!\n"
+        f"═══════════════════════════════════════════════════════════\n"
+        f"ПРИМЕРЫ:\n"
+        f"═══════════════════════════════════════════════════════════\n"
+        f"Кандидат: 'понедельник' → Ты ищешь 'Понедельник'\n"
+        f"Кандидат: 'следующий понедельник' → Ты ищешь строчку 'Следующий понедельник'\n"
+        f"Кандидат: 'завтра' → Ты ищешь строчку с пометкой '(ЗАВТРА)'\n"
     )
     return calendar_context
 
@@ -845,6 +887,7 @@ def _assemble_dynamic_prompt(prompt_library: dict, dialogue_state: str, user_mes
         'call_later': ['#QUALIFICATION_RULES#'],
 
         'init_scheduling_spb': ['#SCHEDULING_ALGORITHM#'],
+        'post_qualification_chat': ['#SCHEDULING_ALGORITHM#'],
         'scheduling_spb_day': ['#SCHEDULING_ALGORITHM#'],
         'scheduling_spb_time': ['#SCHEDULING_ALGORITHM#'],
         'interview_scheduled_spb': ['#SCHEDULING_ALGORITHM#']
