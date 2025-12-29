@@ -607,8 +607,13 @@ def _log_missing_vacancy(title: str, city: str):
 
 
 def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_city: str) -> str:
+    """
+    Поиск вакансии по принципу BEST MATCH с логикой исключения по критическим словам.
+    """
+
     def normalize_text(text: str) -> str:
-        if not text: return ""
+        if not text: 
+            return ""
         text = text.lower().replace("ё", "е")
         # Убираем пунктуацию, оставляем буквы и цифры
         text = re.sub(r"[^\w\s]", " ", text)
@@ -622,35 +627,35 @@ def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_cit
         if not intersection:
             return 0.0
 
-        # КРИТИЧЕСКИЕ СЛОВА (теперь более полный список из ваших данных)
+        # КРИТИЧЕСКИЕ СЛОВА (маркеры, которые нельзя игнорировать)
         critical_words = {
             'старший', 'младший', 'ночной', 'неполный', 'мобильный', 
             'администратор', 'директор', 'товаровед', 'универсал', 
             'пекарь', 'повар', 'кафе', 'бариста', 'кухни', 'сборщик', 'кассир'
         }
 
-        # Штраф, если в базе есть важное слово, которого нет в запросе HH
+        # 1. Если в базе (Google Doc) есть важное слово, которого нет в запросе HH -> отсекаем
         extra_in_db = db_words - input_words
         for word in extra_in_db:
             if word in critical_words:
-                return 0.0  # Сразу отсекаем несовпадающие типы
+                return 0.0
 
-        # Штраф, если в запросе HH есть важное слово, которого нет в базе
+        # 2. Если в запросе HH есть важное слово, которого нет в базе -> отсекаем
+        # ИСПРАВЛЕНО: название переменной теперь совпадает (extra_in_input)
         extra_in_input = input_words - db_words
-        for word in extra_input:
+        for word in extra_in_input:
              if word in critical_words:
                 return 0.0
 
+        # Считаем метрики совпадения
         recall = len(intersection) / len(db_words)
         precision = len(intersection) / len(input_words)
         
-        # Для названий нам важна точность (precision), 
-        # чтобы "Сборщик" не матчился на "Мобильный сборщик"
+        # Для вакансий Precision (точность) чуть важнее, чтобы не путать типы
         return (recall * 0.4) + (precision * 0.6)
 
+    # Логика обработки городов
     norm_input_city = normalize_text(vacancy_city)
-    
-    # Синонимы городов для компенсации разницы написания
     city_synonyms = {
         "спб": "санкт петербург",
         "питер": "санкт петербург",
@@ -663,13 +668,16 @@ def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_cit
     best_match_vacancy = None
     best_match_score = 0.0
 
+    # Перебираем вакансии из библиотеки
     for vacancy in prompt_library.get("vacancies", []):
-        # 1. ПРОВЕРКА ГОРОДА (упрощенная, но надежная)
+        
+        # --- ПРОВЕРКА ГОРОДА ---
         city_match = False
+        # Берем список городов из вакансии и нормализуем каждый
         db_cities = [normalize_text(c) for c in vacancy.get("cities", [])]
         
         for db_city in db_cities:
-            # Прямое совпадение или вхождение (для случаев типа "Бугры (СПб)")
+            # Проверка на вхождение (чтобы "санкт петербург" матчился с "бугры (спб)")
             if norm_input_city in db_city or db_city in norm_input_city:
                 city_match = True
                 break
@@ -677,29 +685,44 @@ def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_cit
         if not city_match:
             continue
 
-        # 2. ПРОВЕРКА НАЗВАНИЯ
+        # --- ПРОВЕРКА НАЗВАНИЯ ---
         max_title_score = 0.0
         for db_title in vacancy.get("titles", []):
             score = get_title_similarity(vacancy_title, db_title)
             if score > max_title_score:
                 max_title_score = score
 
-        # Если название совсем не подходит, пропускаем
+        # Порог вхождения (0.4 достаточно для сетового поиска)
         if max_title_score < 0.4:
             continue
 
+        # Запоминаем лучший результат
         if max_title_score > best_match_score:
             best_match_score = max_title_score
             best_match_vacancy = vacancy
 
+    # --- РЕЗУЛЬТАТ ---
     if best_match_vacancy:
-        logger.info(f"✅ УСПЕХ: '{vacancy_title}' -> '{best_match_vacancy['titles'][0]}'")
+        logger.info(
+            "✅ ВЫБРАНО ОПИСАНИЕ | Запрос: '%s' | Найдено: '%s' | score=%.2f",
+            vacancy_title,
+            best_match_vacancy['titles'][0],
+            best_match_score
+        )
         return best_match_vacancy.get("description", "")
 
-    logger.warning(f"🤡 НЕ НАЙДЕНО: '{vacancy_title}' в городе '{vacancy_city}'")
+    # Если ничего не нашли
+    logger.warning(
+        "🤡 Описание не найдено | title='%s' | city='%s'",
+        vacancy_title,
+        vacancy_city,
+    )
     _log_missing_vacancy(vacancy_title, vacancy_city)
-    return "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. Отвечай на основе FAQ."
 
+    return (
+        "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. "
+        "Отвечай на вопросы кандидата на основе общей информации из FAQ."
+    )
 
 def _generate_calendar_context() -> str:
     """
