@@ -39,8 +39,7 @@ def _parse_vacancies(vacancies_raw_text: str) -> list:
         if titles_str.strip().startswith('—'):
             titles_str = titles_str.strip()[1:].strip()
         # Убираем пояснения в скобках в названии, если они есть в первой строке (но не города в скобках)
-        if '(' in titles_str and ')' in titles_str:
-             titles_str = titles_str.split('(')[0].strip()
+        
 
         titles = [t.strip().lower() for t in titles_str.split(',')]
         
