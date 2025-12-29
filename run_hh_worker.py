@@ -67,6 +67,54 @@ def _format_timestamp_to_msk(timestamp_str: str) -> str:
         return "время не определено"
 
 
+
+def _validate_age_in_text(text: str, suggested_age: any) -> bool:
+    """
+    Проверяет, соответствует ли извлеченный LLM возраст тому, что реально написал пользователь.
+    """
+    if not suggested_age:
+        return False
+    
+    try:
+        age_to_check = int(suggested_age)
+    except (ValueError, TypeError):
+        return False
+
+    # 1. Простая проверка на вхождение числа как отдельного слова (чтобы не путать с 170см)
+    # Ищем число age_to_check окруженное границами слов
+    if re.search(r'\b' + str(age_to_check) + r'\b', text):
+        return True
+
+    # 2. Словарь числительных для критического диапазона (14-25 лет), 
+    # так как именно тут LLM чаще всего ошибается
+    age_words = {
+        14: "четырнадцать", 15: "пятнадцать", 16: "шестнадцать",
+        17: "семнадцать", 18: "восемнадцать", 19: "девятнадцать",
+        20: "двадцать", 21: "двадцать один", 22: "двадцать два",
+        23: "двадцать три", 24: "двадцать четыре", 25: "двадцать пять"
+    }
+
+    if age_to_check in age_words:
+        word = age_words[age_to_check]
+        if word in text.lower():
+            return True
+
+    # 3. Дополнительная проверка: если в тексте ЕСТЬ другие числа, а нашего нет
+    # Извлекаем все числа 14-70 из текста
+    all_numbers_in_text = re.findall(r'\b(1[4-9]|[2-6][0-9]|70)\b', text)
+    
+    # Если LLM говорит 18, а в тексте только "16" - это явная галлюцинация
+    if all_numbers_in_text and str(age_to_check) not in all_numbers_in_text:
+        logger.warning(f"AGE VALIDATION FAILED: LLM suggested {age_to_check}, but found {all_numbers_in_text} in text.")
+        return False
+
+    # Если в тексте вообще нет чисел и слов-чисел, а LLM что-то "придумала"
+    if not all_numbers_in_text:
+        return False
+
+    return True
+
+
 try:
     SPB_TIMEZONE = ZoneInfo("Europe/Moscow")
 except ZoneInfoNotFoundError:
@@ -1181,8 +1229,21 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
 
         # Обновляем extracted_data (candidate уже в сессии)
         if extracted_data and dialogue.status != 'qualified':
-            if extracted_data.get("age"):
-                dialogue.candidate.age = extracted_data["age"]
+            # --- ВАЛИДАЦИЯ ВОЗРАСТА ---
+            raw_age = extracted_data.get("age")
+            if raw_age:
+                # Берем весь текст текущих входящих сообщений для проверки
+                current_user_text = " ".join(all_masked_content).lower()
+                if dialogue.candidate.age == raw_age:
+                     pass 
+                elif _validate_age_in_text(current_user_text, raw_age):
+                    dialogue.candidate.age = raw_age
+                    logger.debug(f"[{dialogue.hh_response_id}] Возраст {raw_age} прошел валидацию.")
+                else:
+                    logger.warning(
+                        f"[{dialogue.hh_response_id}] LLM галлюцинирует возраст: {raw_age}. "
+                        f"В сообщении пользователя этого нет. Запись в БД заблокирована."
+                    )
             if extracted_data.get("citizenship"):
                 dialogue.candidate.citizenship = extracted_data["citizenship"]
             if extracted_data.get("city"):
