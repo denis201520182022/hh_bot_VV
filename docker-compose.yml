@@ -20,6 +20,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
+    logging: # <--- ДОБАВЛЕНО: Настройка логирования для PGBouncer
+      driver: loki
+      options:
+        loki-url: http://loki:3100/loki/api/v1/push
 
   # --- ВОРКЕР: СБОРЩИК (POLLER) ---
   poller:
@@ -33,6 +37,10 @@ services:
       - DB_HOST=pgbouncer
       - DB_PORT=6432
     restart: always
+    logging: # <--- ДОБАВЛЕНО: Настройка логирования для Poller
+      driver: loki
+      options:
+        loki-url: http://loki:3100/loki/api/v1/push
 
   # --- ВОРКЕР: ОБРАБОТЧИК (PROCESSOR) ---
   processor:
@@ -47,6 +55,10 @@ services:
       - DB_PORT=6432
     # Можно масштабировать командой: docker-compose up -d --scale processor=2
     restart: always
+    logging: # <--- ДОБАВЛЕНО: Настройка логирования для Processor
+      driver: loki
+      options:
+        loki-url: http://loki:3100/loki/api/v1/push
 
   # --- ВОРКЕР: НАПОМИНАНИЯ (REMINDERS) ---
   reminders:
@@ -60,6 +72,10 @@ services:
       - DB_HOST=pgbouncer
       - DB_PORT=6432
     restart: always
+    logging: # <--- ДОБАВЛЕНО: Настройка логирования для Reminders
+      driver: loki
+      options:
+        loki-url: http://loki:3100/loki/api/v1/push
 
   # --- ТЕЛЕГРАМ БОТ (УПРАВЛЕНИЕ) ---
   # tg_bot:
@@ -73,6 +89,10 @@ services:
   #     - DB_HOST=pgbouncer
   #     - DB_PORT=6432
   #   restart: always
+  #   logging: # <--- ДОБАВЛЕНО (закомментировано, если сервис не используется)
+  #     driver: loki
+  #     options:
+  #       loki-url: http://loki:3100/loki/api/v1/push
 
   # --- МОНИТОРИНГ ЛОГОВ ---
   loki:
