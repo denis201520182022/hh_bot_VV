@@ -11,7 +11,7 @@ alembic/
 logs/
 credentials.json
 temp/
-
+run_hh_worker_не используется.py
 README.md
 stat.md
 .env

@@ -80,7 +80,7 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
                 model="gpt-4o-mini",
                 messages=messages,
                 temperature=0.3,
-                max_tokens=500,
+                max_tokens=2500,
                 response_format={"type": "json_object"}
             )
         # ------------------------------------------

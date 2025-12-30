@@ -157,87 +157,121 @@ def _log_missing_vacancy(title: str, city: str):
 
 def _find_relevant_vacancy(prompt_library: dict, vacancy_title: str, vacancy_city: str) -> str:
     """
-    Поиск вакансии по принципу BEST MATCH (Лучшее совпадение).
-    Просматривает ВСЕ варианты и выбирает тот, где сумма сходства (город + название) максимальна.
+    Поиск вакансии по принципу BEST MATCH с логикой исключения по критическим словам.
     """
 
     def normalize_text(text: str) -> str:
         if not text: 
             return ""
-        text = text.lower().replace('ё', 'е')
-        text = re.sub(r'[^\w\s]', ' ', text)
+        text = text.lower().replace("ё", "е")
+        text = re.sub(r"[^\w\s]", " ", text)
         return " ".join(text.split())
 
-    def get_similarity(str1: str, str2: str) -> float:
-        """Возвращает коэффициент сходства от 0.0 до 1.0"""
-        if not str1 or not str2:
+    def get_title_similarity(input_str: str, db_str: str) -> float:
+        input_words = set(normalize_text(input_str).split())
+        db_words = set(normalize_text(db_str).split())
+
+        intersection = input_words.intersection(db_words)
+        if not intersection:
             return 0.0
-        if str1 in str2 or str2 in str1:
-            return 1.0 # Полное вхождение считаем идеальным
-        return difflib.SequenceMatcher(None, str1, str2).ratio()
 
-    logger.debug("Запуск поиска описания вакансии (Best Match)", extra={
-        "input_title": vacancy_title,
-        "input_city": vacancy_city
-    })
+        critical_words = {
+            'старший', 'младший', 'ночной', 'неполный', 'мобильный', 
+            'администратор', 'директор', 'товаровед', 'универсал', 
+            'пекарь', 'повар', 'кафе', 'бариста', 'кухни', 'сборщик', 'кассир'
+        }
 
-    norm_input_title = normalize_text(vacancy_title)
+        extra_in_db = db_words - input_words
+        for word in extra_in_db:
+            if word in critical_words:
+                return 0.0
+
+        extra_in_input = input_words - db_words
+        for word in extra_in_input:
+             if word in critical_words:
+                return 0.0
+
+        recall = len(intersection) / len(db_words)
+        precision = len(intersection) / len(input_words)
+        
+        return (recall * 0.4) + (precision * 0.6)
+
+    # Логика обработки городов
     norm_input_city = normalize_text(vacancy_city)
+    city_synonyms = {
+        "спб": "санкт петербург",
+        "питер": "санкт петербург",
+        "ленобласть": "ленинградская область"
+    }
+    for short, full in city_synonyms.items():
+        if short in norm_input_city:
+            norm_input_city = norm_input_city.replace(short, full)
 
-    best_match_description = None
+    best_match_vacancy = None
     best_match_score = 0.0
+    matched_city_name = "не определен" # Переменная для хранения города из БД
 
-    # Перебираем ВСЕ вакансии
+    # Перебираем вакансии из библиотеки
     for vacancy in prompt_library.get("vacancies", []):
         
-        # 1. Считаем лучший балл по городу в этом блоке
-        best_city_score = 0.0
-        for db_city_raw in vacancy.get("cities", []):
-            score = get_similarity(norm_input_city, normalize_text(db_city_raw))
-            if score > best_city_score:
-                best_city_score = score
+        # --- ПРОВЕРКА ГОРОДА ---
+        city_match = False
+        current_vacancy_matched_city = None
         
-        # Если город совсем не похож (меньше 0.65), этот блок нам точно не нужен
-        if best_city_score < 0.65:
+        db_cities_raw = vacancy.get("cities", [])
+        # Создаем список нормализованных городов для сравнения
+        db_cities_norm = [normalize_text(c) for c in db_cities_raw]
+        
+        for i, db_city_norm in enumerate(db_cities_norm):
+            if norm_input_city in db_city_norm or db_city_norm in norm_input_city:
+                city_match = True
+                # Запоминаем оригинальное название города из БД (например, "Бугры (СПб)")
+                current_vacancy_matched_city = db_cities_raw[i]
+                break
+        
+        if not city_match:
             continue
 
-        # 2. Считаем лучший балл по названию в этом блоке
-        best_title_score = 0.0
-        for db_title_raw in vacancy.get("titles", []):
-            score = get_similarity(norm_input_title, normalize_text(db_title_raw))
-            if score > best_title_score:
-                best_title_score = score
-        
-        # Если название не похоже (меньше 0.65), пропускаем
-        if best_title_score < 0.65:
+        # --- ПРОВЕРКА НАЗВАНИЯ ---
+        max_title_score = 0.0
+        for db_title in vacancy.get("titles", []):
+            score = get_title_similarity(vacancy_title, db_title)
+            if score > max_title_score:
+                max_title_score = score
+
+        if max_title_score < 0.4:
             continue
 
-        # 3. Суммарный балл текущего блока
-        total_score = best_city_score + best_title_score
+        # Запоминаем лучший результат
+        if max_title_score > best_match_score:
+            best_match_score = max_title_score
+            best_match_vacancy = vacancy
+            matched_city_name = current_vacancy_matched_city
 
-        # Если этот блок подходит лучше, чем предыдущий найденный
-        if total_score > best_match_score:
-            best_match_score = total_score
-            best_match_description = vacancy["description"]
-            # Логируем кандидата на победу
-            # logger.debug(f"📈 Новый лидер: {vacancy.get('titles')[0]} (Score: {total_score:.2f})")
-
-    if best_match_description:
-        logger.info("Найдено наиболее подходящее описание вакансии", extra={
-            "match_score": round(best_match_score, 2),
-            "vacancy_title": vacancy_title
-        })
-        return best_match_description
+    # --- РЕЗУЛЬТАТ С РАСШИРЕННЫМ ЛОГОМ ---
+    if best_match_vacancy:
+        logger.info(
+            "✅ ВЫБРАНО ОПИСАНИЕ | HH: [%s, %s] | DB: [%s, %s] | score=%.2f",
+            vacancy_title, 
+            vacancy_city,
+            best_match_vacancy['titles'][0], 
+            matched_city_name,
+            best_match_score
+        )
+        return best_match_vacancy.get("description", "")
 
     # Если ничего не нашли
-    logger.warning("Соответствующее описание вакансии не найдено в базе знаний", extra={
-        "vacancy_title": vacancy_title,
-        "vacancy_city": vacancy_city
-    })
+    logger.warning(
+        "🤡 Описание не найдено | HH title='%s' | HH city='%s'",
+        vacancy_title,
+        vacancy_city,
+    )
     _log_missing_vacancy(vacancy_title, vacancy_city)
-    
-    return "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. Отвечай на вопросы кандидата на основе общей информации из FAQ."
 
+    return (
+        "ОПИСАНИЕ ВАКАНСИИ НЕ НАЙДЕНО. "
+        "Отвечай на вопросы кандидата на основе общей информации из FAQ."
+    )
 
 def _generate_calendar_context() -> str:
     """
@@ -246,26 +280,60 @@ def _generate_calendar_context() -> str:
     moscow_tz = ZoneInfo("Europe/Moscow")
     current_datetime_utc = datetime.datetime.now(moscow_tz)
     weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    
+    # Словарь для склонения в "следующий/следующая/следующее"
+    weekday_next_form = {
+        "понедельник": "Следующий понедельник",
+        "вторник": "Следующий вторник",
+        "среда": "Следующая среда",
+        "четверг": "Следующий четверг",
+        "пятница": "Следующая пятница",
+        "суббота": "Следующая суббота",
+        "воскресенье": "Следующее воскресенье"
+    }
 
     current_weekday = weekdays_ru[current_datetime_utc.weekday()]
     current_date_str = current_datetime_utc.strftime("%Y-%m-%d")
     current_time_str = current_datetime_utc.strftime("%H:%M")
 
+    # Собираем информацию о днях недели для отслеживания повторений
+    weekday_occurrences = {}
+    
     calendar_context_lines = []
-    for i in range(14):  # Сегодня + 13 дней вперед = 14 дней
+    for i in range(14):
         date_cursor = current_datetime_utc + datetime.timedelta(days=i)
         wd_name = weekdays_ru[date_cursor.weekday()]
         date_str = date_cursor.strftime("%Y-%m-%d")
-
-        label = ""
+        
+        # Отслеживаем, сколько раз встречался этот день недели
+        if wd_name not in weekday_occurrences:
+            weekday_occurrences[wd_name] = 0
+        weekday_occurrences[wd_name] += 1
+        
+        # Формируем префикс и суффикс
+        prefix = ""
+        suffix = ""
+        
         if i == 0:
-            label = " ← ТЫ ЗДЕСЬ (СЕГОДНЯ)"
+            prefix = "(СЕГОДНЯ) "
+            suffix = " ← ТЫ ЗДЕСЬ"
+            day_label = wd_name.capitalize()
         elif i == 1:
-            label = " ← ЗАВТРА"
+            prefix = "(ЗАВТРА) "
+            day_label = wd_name.capitalize()
         elif i == 2:
-            label = " ← ПОСЛЕЗАВТРА"
-
-        calendar_context_lines.append(f"{wd_name}: {date_str}{label}")
+            prefix = "(ПОСЛЕЗАВТРА) "
+            day_label = wd_name.capitalize()
+        else:
+            # Для остальных дней
+            if weekday_occurrences[wd_name] == 2:
+                # Второе упоминание дня недели - добавляем "Следующий"
+                day_label = weekday_next_form[wd_name]
+            else:
+                # Первое упоминание или третье+ - просто название с заглавной
+                day_label = wd_name.capitalize()
+        
+        calendar_context_lines.append(f"{prefix}{date_str} {day_label}{suffix}")
 
     calendar_string = "\n".join(calendar_context_lines)
 
@@ -278,16 +346,24 @@ def _generate_calendar_context() -> str:
         f"Используй ТОЛЬКО эту таблицу (таблица начинается с СЕГОДНЯ и идет на 14 дней вперед):\n\n"
         f"{calendar_string}\n\n"
         f"ПРАВИЛА РАБОТЫ С ДАТАМИ:\n"
-        f"1. Если кандидат говорит конкретный день недели БЕЗ уточнений (например, просто 'понедельник'):\n"
-        f"   → Бери ПЕРВЫЙ такой день (то есть ближайший) из списка выше\n\n"
+        f"1. Кандидат говорит просто день недели ('понедельник', 'вторник'):\n"
+        f"   → Найди ПЕРВУЮ строку с этим днем (без слова 'Следующий')\n"
+        f"   → Скопируй дату из этой строки\n\n"
         f"2. Если кандидат говорит 'СЛЕДУЮЩИЙ [день недели]' (например, 'следующий понедельник'):\n"
-        f"   → Бери ВТОРОЙ такой день из списка выше\n\n"
+        f"   → Бери такой день из списка выше, где написано 'СЛЕДУЮЩИЙ [день недели]' (например, 'следующий понедельник')\n\n"
+        f"   → Скопируй дату из этой строки\n\n"
         f"3. Если кандидат называет день недели, который совпадает с СЕГОДНЯ:\n"
         f"   → ОБЯЗАТЕЛЬНО уточни: 'Вы имеете в виду сегодня или через неделю?'\n\n"
         f"4. Если кандидат говорит 'сегодня', 'завтра', 'послезавтра':\n"
-        f"   → Ищи в списке пометку '← СЕГОДНЯ', '← ЗАВТРА' или '← ПОСЛЕЗАВТРА'\n\n"
+        f"   → Ищи в списке пометку 'СЕГОДНЯ', 'ЗАВТРА' или 'ПОСЛЕЗАВТРА'\n\n"
         f"5. ВСЕГДА копируй дату ТОЧНО из таблицы в формате YYYY-MM-DD\n"
         f"6. НИКОГДА не изобретай даты сам - только из этой таблицы!\n"
+        f"═══════════════════════════════════════════════════════════\n"
+        f"ПРИМЕРЫ:\n"
+        f"═══════════════════════════════════════════════════════════\n"
+        f"Кандидат: 'понедельник' → Ты ищешь 'Понедельник'\n"
+        f"Кандидат: 'следующий понедельник' → Ты ищешь строчку 'Следующий понедельник'\n"
+        f"Кандидат: 'завтра' → Ты ищешь строчку с пометкой '(ЗАВТРА)'\n"
     )
     return calendar_context
 
@@ -312,6 +388,7 @@ def _assemble_dynamic_prompt(prompt_library: dict, dialogue_state: str, user_mes
         'call_later': ['#QUALIFICATION_RULES#'],
 
         'init_scheduling_spb': ['#SCHEDULING_ALGORITHM#'],
+        'post_qualification_chat': ['#SCHEDULING_ALGORITHM#'],
         'scheduling_spb_day': ['#SCHEDULING_ALGORITHM#'],
         'scheduling_spb_time': ['#SCHEDULING_ALGORITHM#'],
         'interview_scheduled_spb': ['#SCHEDULING_ALGORITHM#']
@@ -351,16 +428,8 @@ def _assemble_dynamic_prompt(prompt_library: dict, dialogue_state: str, user_mes
     )
     prompt_pieces.insert(1, vacancy_context)
     
-    # Логируем состав промпта в DEBUG
-    logger.debug("Сформирован динамический системный промпт", extra={
-        "dialogue_state": dialogue_state,
-        "included_library_blocks": final_block_keys,
-        "has_calendar": dialogue_state in SCHEDULING_STATES,
-        "has_post_qual": dialogue_state in POST_QUALIFICATION_STATES and bool(prompt_library.get('#POSTCVAL#')),
-        "vacancy_desc_length": len(vacancy_description)
-    })
-    return "\n\n".join(prompt_pieces)
 
+    return "\n\n".join(prompt_pieces)
 
 
 
