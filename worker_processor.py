@@ -751,6 +751,11 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
         llm_response = llm_data.get("parsed_response")
         usage_stats = llm_data.get("usage_stats")
 
+        # Достаем переменные, чтобы они были доступны ВЕЗДЕ ниже
+        bot_response_text = llm_response.get("response_text")
+        new_state = llm_response.get("new_state", "error_state") # <--- ВОТ ОНА НУЖНА В ЛОГЕ
+        extracted_data = llm_response.get("extracted_data")
+
         # === ЛОГИРОВАНИЕ ТОКЕНОВ ===
         if usage_stats:
             try:
@@ -808,9 +813,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                 log.error("Ошибка при сохранении статистики токенов в БД", exc_info=True, extra={"error": str(e)})
         # ===========================
 
-        bot_response_text = llm_response.get("response_text")
-        new_state = llm_response.get("new_state", "error_state")
-        extracted_data = llm_response.get("extracted_data")
+        
 
         # Обновляем статус
         if dialogue.status == 'new':
