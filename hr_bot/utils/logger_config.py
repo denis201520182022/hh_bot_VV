@@ -8,7 +8,8 @@ from datetime import datetime
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
         super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
-        # Добавляем метку времени в формате ISO для Loki
+        
+        # 1. Твоя логика времени и уровня
         if not log_record.get('timestamp'):
             log_record['timestamp'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
         if log_record.get('level'):
@@ -16,14 +17,26 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
         else:
             log_record['level'] = record.levelname
 
+        # 2. НОВАЯ ЛОГИКА: Принудительно добавляем extra поля в JSON
+        # Это берет все, что ты передал в extra={...}, и сует в лог
+        skip_keys = {
+            'args', 'asctime', 'created', 'exc_info', 'exc_text', 'filename',
+            'funcName', 'levelname', 'levelno', 'lineno', 'module',
+            'msecs', 'message', 'msg', 'name', 'pathname', 'process',
+            'processName', 'relativeCreated', 'stack_info', 'thread', 'threadName'
+        }
+        
+        for key, value in record.__dict__.items():
+            if key not in log_record and key not in skip_keys and not key.startswith('_'):
+                log_record[key] = value
+
 def setup_logging(log_filename: str):
     log_dir = 'logs'
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    # Определяем формат для JSON. Эти ключи станут фильтрами в Grafana.
-    # Ты можешь добавлять любые свои поля через параметр extra при вызове лога.
-    json_format = "%(timestamp)s %(level)s %(name)s %(message)s"
+    # 3. ДОБАВЛЕНО %(exc_info)s — чтобы видеть трейсбэки ошибок
+    json_format = "%(timestamp)s %(level)s %(name)s %(message)s %(exc_info)s"
     formatter = CustomJsonFormatter(json_format)
 
     root_logger = logging.getLogger()
@@ -32,11 +45,11 @@ def setup_logging(log_filename: str):
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
 
-    # Обработчик консоли (Важно для Docker + Loki)
+    # Обработчик консоли
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     
-    # Обработчик файла (Сохраняем твою ротацию)
+    # Обработчик файла
     file_handler = TimedRotatingFileHandler(
         os.path.join(log_dir, log_filename),
         when='midnight',

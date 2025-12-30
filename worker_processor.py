@@ -805,7 +805,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                 # (Если usage_log дальше не нужен, его можно не рефрешить)
 
             except Exception as e:
-                log.error("Ошибка при сохранении статистики токенов в БД", extra={"error": str(e)})
+                log.error("Ошибка при сохранении статистики токенов в БД", exc_info=True, extra={"error": str(e)})
         # ===========================
 
         bot_response_text = llm_response.get("response_text")
