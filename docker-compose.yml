@@ -20,10 +20,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
-    logging: # <--- ДОБАВЛЕНО: Настройка логирования для PGBouncer
+    logging:
       driver: loki
       options:
-        loki-url: http://loki:3100/loki/api/v1/push
+        loki-url: "http://172.17.0.1:3100/loki/api/v1/push"
 
   # --- ВОРКЕР: СБОРЩИК (POLLER) ---
   poller:
@@ -37,10 +37,10 @@ services:
       - DB_HOST=pgbouncer
       - DB_PORT=6432
     restart: always
-    logging: # <--- ДОБАВЛЕНО: Настройка логирования для Poller
+    logging:
       driver: loki
       options:
-        loki-url: http://loki:3100/loki/api/v1/push
+        loki-url: "http://172.17.0.1:3100/loki/api/v1/push"
 
   # --- ВОРКЕР: ОБРАБОТЧИК (PROCESSOR) ---
   processor:
@@ -55,10 +55,10 @@ services:
       - DB_PORT=6432
     # Можно масштабировать командой: docker-compose up -d --scale processor=2
     restart: always
-    logging: # <--- ДОБАВЛЕНО: Настройка логирования для Processor
+    logging:
       driver: loki
       options:
-        loki-url: http://loki:3100/loki/api/v1/push
+        loki-url: "http://172.17.0.1:3100/loki/api/v1/push"
 
   # --- ВОРКЕР: НАПОМИНАНИЯ (REMINDERS) ---
   reminders:
@@ -72,10 +72,10 @@ services:
       - DB_HOST=pgbouncer
       - DB_PORT=6432
     restart: always
-    logging: # <--- ДОБАВЛЕНО: Настройка логирования для Reminders
+    logging:
       driver: loki
       options:
-        loki-url: http://loki:3100/loki/api/v1/push
+        loki-url: "http://172.17.0.1:3100/loki/api/v1/push"
 
   # --- ТЕЛЕГРАМ БОТ (УПРАВЛЕНИЕ) ---
   # tg_bot:
@@ -89,10 +89,10 @@ services:
   #     - DB_HOST=pgbouncer
   #     - DB_PORT=6432
   #   restart: always
-  #   logging: # <--- ДОБАВЛЕНО (закомментировано, если сервис не используется)
-  #     driver: loki
-  #     options:
-  #       loki-url: http://loki:3100/loki/api/v1/push
+  #   logging:
+        # driver: loki
+        # options:
+        #   loki-url: "http://172.17.0.1:3100/loki/api/v1/push"
 
   # --- МОНИТОРИНГ ЛОГОВ ---
   loki:
@@ -107,7 +107,7 @@ services:
     image: grafana/grafana:latest
     container_name: hr_bot_grafana
     ports:
-      - "3001:3000"
+      - "3000:3000"
     depends_on:
       - loki
     restart: always
