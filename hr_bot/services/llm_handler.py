@@ -113,44 +113,6 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
         logger.info(f"Использовано токенов - Total: {usage.total_tokens}, Input: {usage.prompt_tokens}, Output: {usage.completion_tokens}, Cached: {cached_tokens}")
 
         #print(response_content)
-
-        # ### <--- НОВОЕ: ЛОГИРОВАНИЕ В ФАЙЛ (ЧТОБЫ ПОСМОТРЕТЬ ГИГАНТСКИЙ ОТВЕТ)
-        # Создаем папку для логов, если нет
-        log_dir = "debug_llm_responses"
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # Генерируем имя файла с таймстампом
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        # Добавляем в имя файла finish_reason, чтобы сразу видеть проблемные
-        log_filename = f"{log_dir}/resp_{timestamp}_{finish_reason}.txt"
-        
-        with open(log_filename, "w", encoding="utf-8") as f:
-            f.write(response_content)
-        
-        logger.info(f"📄 Ответ модели сохранен в файл: {log_filename}")
-
-
-        # ### <--- НОВОЕ: ОБРАБОТКА ОБРЫВА ПО ЛИМИТУ ТОКЕНОВ
-        if finish_reason == "length":
-            error_msg = f"⚠️ Ответ модели был прерван лимитом токенов ({usage.completion_tokens} tokens). JSON не валиден."
-            logger.error(error_msg)
-            
-            # ВАЖНО: Мы возвращаем результат, а НЕ выбрасываем исключение.
-            # Это предотвращает срабатывание @retry из библиотеки tenacity.
-            return {
-                "parsed_response": None, # Указываем вызывающему коду, что парсинг не удался
-                "error": "token_limit_exceeded", # Метка ошибки
-                "raw_content": response_content, # Возвращаем сырой текст (можно попытаться распарсить вручную, если надо)
-                "usage_stats": {
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
-                    "cached_tokens": cached_tokens
-                }
-            }
-        # -----------------------------------------------------------
-
-        # Если дошли сюда, значит finish_reason == 'stop' (все ок), парсим JSON
         parsed_response = json.loads(response_content)
 
         # --- ИЗМЕНИТЬ ЭТУ ЧАСТЬ (чтобы вернуть статистику наружу) ---
