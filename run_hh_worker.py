@@ -1046,10 +1046,10 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                             system_command_content = None
 
                             if citizenship == "ЕАЭС":
-                                system_command_content = "[SYSTEM COMMAND] Кандидат сообщил что у него гражданство одной из стран ЕАЭС, поставь в поле citizenship строго значение 'ЕАЭС' и переходи к следующему этапу анкеты (возрасту)"
+                                system_command_content = "[SYSTEM COMMAND] Кандидат сообщил что у него гражданство одной из стран ЕАЭС. Установи extracted_data.citizenship='ЕАЭС'. Переходи к следующему этапу (возрасту) и ОБЯЗАТЕЛЬНО задай кандидату вопрос про его возраст."
                                 
                             elif citizenship == "внж рф" or  citizenship == "рвп рф":
-                                system_command_content = "[SYSTEM COMMAND] Кандидат сообщил что у него РВП РФ или ВНЖ РФ, поставь в поле citizenship строго значение строго значение 'внж рф' или 'рвп рф' соответственно и переходи к следующему этапу анкеты (возрасту)"
+                                system_command_content = "[SYSTEM COMMAND] Кандидат сообщил что у него РВП РФ или ВНЖ РФ, поставь в поле citizenship строго значение строго значение 'внж рф' или 'рвп рф' соответственно и переходи к следующему этапу анкеты (возрасту) и ОБЯЗАТЕЛЬНО задай кандидату вопрос про его возраст."
                             else:
                                 system_command_content = f"[SYSTEM COMMAND] Кандидат сообщил что у него гражданство {citizenship}, уточни есть ли у него РВП или ВНЖ в России."
                                 dialogue.dialogue_state = "clarifying_citizenship"
@@ -1331,7 +1331,7 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
                     new_state = 'forwarded_to_researcher'
                     bot_response_text = """Спасибо! Я передам Вашу заявку коллегам.
                                         Обращаем Ваше внимание, что в связи с новогодними праздниками сроки обратной связи могут быть немного увеличены. Мои коллеги свяжутся с Вами в период с 5 по 13 января.  Мы постараемся сделать это как можно раньше в рамках указанного периода.
-                                        Благодарим за понимание и еще раз поздравляем Вас с наступающим Новым годом!"""
+                                        Благодарим за понимание и еще раз."""
                     # Логика перемещения в папку 'interview' и смены статуса на 'qualified' сработает ниже
 
 
@@ -1666,19 +1666,34 @@ async def _process_single_dialogue(dialogue_id: int, recruiter_id: int, prompt_l
             logger.debug(f"[{dialogue.hh_response_id}] API move: {time.monotonic() - api_move_start:.2f} sec.")
 
         # Если LLM не вернула текст, не отправляем сообщение
-        if bot_response_text is None or bot_response_text == "":
-            logger.info(f"[{dialogue.hh_response_id}] LLM вернула пустой ответ. Обновляем состояние без отправки сообщения.")
+        # Если LLM не вернула текст
+        if bot_response_text is None or bot_response_text.strip() == "":
+            
+            # СЦЕНАРИЙ 1: ШТАТНОЕ МОЛЧАНИЕ
+            # Согласно твоему промпту, при qualification_complete response_text должен быть null.
+            # Если мы попали сюда с этим стейтом, значит валидация (is_candidate_profile_complete) 
+            # прошла, но не перевела кандидата в forwarded/failed (например, ждем чего-то еще).
+            # В этом случае молчание допустимо.
+            if new_state == 'qualification_complete':
+                logger.info(f"[{dialogue.hh_response_id}] LLM вернула пустой ответ для 'qualification_complete'. Это соответствует правилам.")
+                
+                # Сохраняем историю и стейт, но не отправляем сообщение
+                new_history = (dialogue.history or []) + user_entries_to_history
+                dialogue.history = new_history[-150:]
+                dialogue.dialogue_state = new_state
+                dialogue.pending_messages = None
+                dialogue.last_updated = datetime.datetime.now(datetime.timezone.utc)
 
-            # Сохраняем историю пользователя
-            new_history = (dialogue.history or []) + user_entries_to_history
-            dialogue.history = new_history[-150:]
+                await db.commit()
+                return
 
-            dialogue.dialogue_state = new_state
-            dialogue.pending_messages = None
-            dialogue.last_updated = datetime.datetime.now(datetime.timezone.utc)
-
-            await db.commit()
-            return
+            # СЦЕНАРИЙ 2: ОШИБОЧНОЕ МОЛЧАНИЕ
+            # Если стейт подразумевает диалог (awaiting_age, awaiting_phone, scheduling и т.д.),
+            # а бот молчит — это ошибка генерации.
+            else:
+                logger.error(f"[{dialogue.hh_response_id}] ОШИБКА: LLM вернула пустоту для разговорного стейта '{new_state}'. Вызываю RETRY.")
+                # Мы специально кидаем ошибку, чтобы сработал rollback и бот попробовал снова в следующем цикле
+                raise ValueError(f"Empty response text forbidden for conversational state: {new_state}")
 
         # Отправка сообщения
         message_sent = await hh_api.send_message(recruiter, db, dialogue.hh_response_id, bot_response_text)

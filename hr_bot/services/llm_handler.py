@@ -81,7 +81,8 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
                 messages=messages,
                 temperature=0.1,
                 max_tokens=2500,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                frequency_penalty=1.0 # <--- ИЗМЕНЕНИЕ 2: Штраф за повторы. Это убьет бесконечные циклы пробелов.
             )
         # ------------------------------------------
 
